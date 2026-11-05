@@ -124,6 +124,11 @@ export function StatusBar({ progress, error, notice, onDismissError, onDismissNo
       <strong className="brand">Tesseract</strong>
       <UpdateStatus />
       {progress?.message && <ProgressLabel progress={progress} />}
+      {progress?.message && progress.cancellable && (
+        <button className="small" onClick={() => window.api.cancelLoad()} title="Stop loading this review. Files that are already downloaded stay saved for the next time.">
+          ✕ Cancel
+        </button>
+      )}
       {notice && (
         <span className="status-notice" onClick={onDismissNotice} title="Click to dismiss">
           ⓘ {notice}

@@ -67,7 +67,8 @@ button.done {
   background: #1f3a27;
   border-color: var(--ok);
 }
-button.small {
+button.small,
+select.small {
   padding: 1px 6px;
   font-size: 12px;
 }
@@ -1134,6 +1135,22 @@ body.resizing-y * {
   align-items: center;
   gap: 8px;
 }
+.saved-data {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+.saved-data label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.saved-data label .muted {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .settings-actions .muted {
   flex: 1;
   font-size: 11px;
@@ -1173,6 +1190,90 @@ body.resizing-y * {
 }
 .prereview-actions {
   margin: 4px 0 6px;
+}
+.walkthrough-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.walkthrough-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+.walkthrough-units {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.walkthrough-units li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.walkthrough-units li:hover {
+  background: var(--panel);
+}
+.walkthrough-units li.current {
+  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--panel);
+}
+.walkthrough-checks ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.walkthrough-answer {
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.walkthrough-ask {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.walkthrough-ask textarea {
+  width: 100%;
+  resize: vertical;
+}
+.walkthrough-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.walkthrough-steps li {
+  display: flex;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.walkthrough-steps li:hover {
+  background: var(--panel-2);
+}
+.walkthrough-steps li.current {
+  background: var(--panel-2);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 600;
+}
+.walkthrough-mark {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--ok);
 }
 .prereview li button {
   margin-left: 4px;

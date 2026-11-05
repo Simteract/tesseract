@@ -69,9 +69,37 @@ export class Cm {
     return Number((await this.run(['find', 'changeset', `where id=${objectId}`, '--format={changesetid}', '--nototal'])).trim())
   }
 
-  /** Lists the files that the branch changes. '--integration' drops the changes merged in from the parent branch. */
-  diffBranch(branch: string): Promise<FileChange[]> {
-    return this.diff([`br:${branch}`, '--integration'])
+  /**
+   * Lists the files that the branch changes. '--integration' drops the changes merged in from the parent branch.
+   * '--integration' lists only the changes that are not merged into the parent yet, so it is empty for a merged branch.
+   * A merged branch can still have an open review, so an empty result falls back to mergedBranchDiff.
+   */
+  async diffBranch(branch: string): Promise<FileChange[]> {
+    const pending = await this.diff([`br:${branch}`, '--integration'])
+    return pending.length > 0 ? pending : this.mergedBranchDiff(branch)
+  }
+
+  /**
+   * After a merge of parent changeset S into the branch, the branch head holds S plus the own changes
+   * of the branch. So the diff from S to the head lists only the own changes. The plain branch diff
+   * also lists every file of the merge, e.g. 2170 files instead of 81.
+   */
+  private async mergedBranchDiff(branch: string): Promise<FileChange[]> {
+    const parent = branch.slice(0, branch.lastIndexOf('/'))
+    const quoted = (name: string): string => name.replace(/'/g, "''")
+    if (!parent) return this.diff([`br:${branch}`])
+    const merges = await this.run(['find', 'merge', `where dstbranch='br:${quoted(branch)}'`, `--format={srcbranch}${FIELD_SEPARATOR}{srcchangeset}`, '--nototal'])
+    const lastParentMerge = Math.max(
+      0,
+      ...merges
+        .split(/\r?\n/)
+        .map((line) => line.split(FIELD_SEPARATOR))
+        .filter(([source]) => source === `br:${parent}`)
+        .map(([, changeset]) => Number(changeset) || 0)
+    )
+    const changesets = await this.run(['find', 'changeset', `where branch='${quoted(branch)}'`, '--format={changesetid}', '--nototal'])
+    const head = Math.max(0, ...changesets.split(/\r?\n/).map((line) => Number(line) || 0))
+    return lastParentMerge > 0 && head > 0 ? this.diff([`cs:${lastParentMerge}`, `cs:${head}`]) : this.diff([`br:${branch}`])
   }
 
   diffChangeset(changeset: number): Promise<FileChange[]> {
@@ -143,10 +171,11 @@ export class Cm {
   }
 
   /** Downloads each revision into 'dir/<revid>' once. Later calls reuse the cached files. */
-  async fetchRevisions(revIds: number[], dir: string, onProgress?: (done: number, total: number) => void): Promise<void> {
+  async fetchRevisions(revIds: number[], dir: string, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<void> {
     mkdirSync(dir, { recursive: true })
     const missing = [...new Set(revIds)].filter((id) => id > 0 && !existsSync(join(dir, String(id))))
     for (let i = 0; i < missing.length; i += GETFILE_BATCH) {
+      signal?.throwIfAborted()
       onProgress?.(i, missing.length)
       const pairs = missing.slice(i, i + GETFILE_BATCH).map((id) => `revid:${id};${join(dir, String(id))}`)
       await this.run(['getfile', ...pairs])

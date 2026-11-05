@@ -1,10 +1,30 @@
 import { randomUUID } from 'node:crypto'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import windowIcon from '../../build/icon.ico?asset'
-import type { CommitRange, Draft, Explanation, GraphNode, McpInfo, NewDraft, PreReview, PreReviewStatus, Progress, ReviewFilter, ReviewModel, Selection, Settings } from '../shared/types'
-import { buildFixPrompt, EXPLAIN_BATCH, explainContext, launchClaude, preReview, summarizeCluster } from './claude'
+import type {
+  Cluster,
+  CommitRange,
+  Draft,
+  Explanation,
+  GraphNode,
+  McpInfo,
+  NewDraft,
+  PreReview,
+  PreReviewStatus,
+  Progress,
+  ReviewFilter,
+  ReviewModel,
+  Selection,
+  Settings,
+  StoreKind,
+  StoreSize,
+  Walkthrough,
+  WalkthroughLevel,
+  WalkthroughStatus
+} from '../shared/types'
+import { askWalkthrough, buildFixPrompt, EXPLAIN_BATCH, explainContext, launchClaude, preReview, summarizeCluster, walkthrough } from './claude'
 import { initParsers } from './languages'
 import { startMcpServer } from './mcp'
 import { ReviewService } from './review'
@@ -18,12 +38,15 @@ const summariesFile = (): string => join(app.getPath('userData'), 'summaries.jso
 const draftsFile = (): string => join(app.getPath('userData'), 'drafts.json')
 const preReviewsFile = (): string => join(app.getPath('userData'), 'prereviews.json')
 const explanationsFile = (): string => join(app.getPath('userData'), 'explanations.json')
+const walkthroughsFile = (): string => join(app.getPath('userData'), 'walkthroughs.json')
+const revisionsDir = (): string => join(app.getPath('userData'), 'revisions')
 
 let window: BrowserWindow | undefined
 let settings: Settings = { workspace: '', me: '' }
 let service: ReviewService | undefined
 let summaries: Record<string, string> = {}
 let preReviews: Record<string, PreReview> = {}
+let walkthroughs: Record<string, Walkthrough> = {}
 /** Explanations of context units, by explanationKey. The relation part depends on the change, so each review has its own explanations. */
 let explanations: Record<string, Explanation> = {}
 let drafts: Draft[] = []
@@ -44,6 +67,16 @@ function loadJson<T>(path: string, fallback: T): T {
 /** A new revision of any file makes the saved pre-review stale. */
 function preReviewKey(model: ReviewModel): string {
   return `${model.key}|${model.files.map((f) => f.headRevId).join(',')}`
+}
+
+function walkthroughKey(model: ReviewModel, level: WalkthroughLevel): string {
+  return `${preReviewKey(model)}|${level}`
+}
+
+/** New revisions of the files of the cluster make the saved summary stale. */
+function summaryKey(model: ReviewModel, cluster: Cluster): string {
+  const revs = cluster.files.map((p) => model.files.find((f) => f.path === p)?.headRevId).join(',')
+  return `${model.key}|${cluster.label}|${revs}`
 }
 
 /** A new revision of the file makes the saved explanation stale. */
@@ -124,11 +157,98 @@ function startPreReview(modelKey: string): Promise<PreReview> {
   return task
 }
 
+/** Walkthroughs in progress, by walkthrough key. A second request for the same model and level waits for the first run. */
+const runningWalkthroughs = new Map<string, Promise<Walkthrough>>()
+
+/** Runs a walkthrough and tells the window when it starts and ends, like startPreReview. */
+function startWalkthrough(modelKey: string, level: WalkthroughLevel): Promise<Walkthrough> {
+  const s = reviewService()
+  const model = s.model(modelKey)
+  const key = walkthroughKey(model, level)
+  const running = runningWalkthroughs.get(key)
+  if (running) return running
+  const send = (status: WalkthroughStatus): void => window?.webContents.send('walkthrough', status)
+  send({ modelKey, level, startedAt: Date.now() })
+  const clusterSummaries = new Map(model.clusters.flatMap((c) => (summaries[summaryKey(model, c)] ? [[c.id, summaries[summaryKey(model, c)]] as const] : [])))
+  const task = walkthrough(s, model, settings.workspace, level, { clusterSummaries, explanations: savedExplanations(model) })
+    .then((result) => {
+      walkthroughs[key] = result
+      writeFileSync(walkthroughsFile(), JSON.stringify(walkthroughs))
+      send({ modelKey, level, result })
+      return result
+    })
+    .catch((e: unknown) => {
+      send({ modelKey, level })
+      throw e
+    })
+    .finally(() => runningWalkthroughs.delete(key))
+  runningWalkthroughs.set(key, task)
+  return task
+}
+
+async function askWalkthroughStep(a: { modelKey: string; level: WalkthroughLevel; step: number; question: string }): Promise<Walkthrough> {
+  const s = reviewService()
+  const model = s.model(a.modelKey)
+  const key = walkthroughKey(model, a.level)
+  const walk = walkthroughs[key]
+  if (!walk) throw new Error('Run the walkthrough first')
+  const answer = await askWalkthrough(s, model, settings.workspace, walk, a.step, a.question)
+  const current = walkthroughs[key] ?? walk
+  const steps = current.steps.map((step, i) => (i === a.step ? { ...step, answers: [...step.answers, { question: a.question.trim(), answer: answer.trim() }] } : step))
+  walkthroughs[key] = { ...current, steps }
+  writeFileSync(walkthroughsFile(), JSON.stringify(walkthroughs))
+  return walkthroughs[key]
+}
+
 function addDrafts(fields: NewDraft[]): Draft[] {
   const added = fields.map((f): Draft => ({ ...f, id: randomUUID(), createdAt: new Date().toISOString() }))
   drafts.push(...added)
   saveDrafts()
   return added
+}
+
+function fileBytes(path: string): number {
+  return existsSync(path) ? statSync(path).size : 0
+}
+
+function storeSizes(): Record<StoreKind, StoreSize> {
+  const json = (path: string, count: number): StoreSize => ({ count, bytes: fileBytes(path) })
+  const dir = revisionsDir()
+  const revisionFiles = existsSync(dir) ? readdirSync(dir) : []
+  return {
+    explanations: json(explanationsFile(), Object.keys(explanations).length),
+    summaries: json(summariesFile(), Object.keys(summaries).length),
+    prereviews: json(preReviewsFile(), Object.keys(preReviews).length),
+    walkthroughs: json(walkthroughsFile(), Object.keys(walkthroughs).length),
+    drafts: json(draftsFile(), drafts.length),
+    revisions: { count: revisionFiles.length, bytes: revisionFiles.reduce((sum, name) => sum + fileBytes(join(dir, name)), 0) }
+  }
+}
+
+/** The revision cache refills on the next load. The window reloads the open review, because its code reads from the cache. */
+function clearStores(kinds: StoreKind[]): void {
+  const wanted = new Set(kinds)
+  if (wanted.has('explanations')) {
+    explanations = {}
+    writeFileSync(explanationsFile(), '{}')
+  }
+  if (wanted.has('summaries')) {
+    summaries = {}
+    writeFileSync(summariesFile(), '{}')
+  }
+  if (wanted.has('prereviews')) {
+    preReviews = {}
+    writeFileSync(preReviewsFile(), '{}')
+  }
+  if (wanted.has('walkthroughs')) {
+    walkthroughs = {}
+    writeFileSync(walkthroughsFile(), '{}')
+  }
+  if (wanted.has('drafts')) {
+    drafts = []
+    saveDrafts()
+  }
+  if (wanted.has('revisions')) rmSync(revisionsDir(), { recursive: true, force: true })
 }
 
 function saveDrafts(): void {
@@ -137,12 +257,12 @@ function saveDrafts(): void {
 }
 
 function progress(message: string, done?: number, total?: number): void {
-  window?.webContents.send('progress', { message, done, total } satisfies Progress)
+  window?.webContents.send('progress', { message, done, total, cancellable: !!message && !!service?.loading } satisfies Progress)
 }
 
 function reviewService(): ReviewService {
   if (!settings.workspace) throw new Error('Choose a workspace first')
-  service ??= new ReviewService(openSource(settings.workspace), join(app.getPath('userData'), 'revisions'), progress, () => settings.excludePatterns ?? [])
+  service ??= new ReviewService(openSource(settings.workspace), revisionsDir(), progress, () => settings.excludePatterns ?? [])
   return service
 }
 
@@ -223,8 +343,7 @@ function registerIpc(): void {
     const model = s.model(a.modelKey)
     const cluster = model.clusters.find((c) => c.id === a.clusterId)
     if (!cluster) throw new Error('Unknown cluster')
-    const revs = cluster.files.map((p) => model.files.find((f) => f.path === p)?.headRevId).join(',')
-    const cacheKey = `${model.key}|${cluster.label}|${revs}`
+    const cacheKey = summaryKey(model, cluster)
     if (!a.force && summaries[cacheKey]) return summaries[cacheKey]
     const summary = await summarizeCluster(s, model, cluster, settings.workspace)
     summaries[cacheKey] = summary
@@ -240,16 +359,13 @@ function registerIpc(): void {
     writeFileSync(explanationsFile(), JSON.stringify(explanations))
     return savedExplanations(model)
   })
-  ipcMain.handle('ai:clear', () => {
-    explanations = {}
-    summaries = {}
-    preReviews = {}
-    writeFileSync(explanationsFile(), '{}')
-    writeFileSync(summariesFile(), '{}')
-    writeFileSync(preReviewsFile(), '{}')
-  })
+  ipcMain.handle('stores:sizes', () => storeSizes())
+  ipcMain.handle('stores:clear', (_e, kinds: StoreKind[]) => clearStores(kinds))
   ipcMain.handle('prereview:get', (_e, modelKey: string) => preReviews[preReviewKey(reviewService().model(modelKey))] ?? null)
   ipcMain.handle('prereview:run', (_e, modelKey: string) => startPreReview(modelKey))
+  ipcMain.handle('walkthrough:get', (_e, a: { modelKey: string; level: WalkthroughLevel }) => walkthroughs[walkthroughKey(reviewService().model(a.modelKey), a.level)] ?? null)
+  ipcMain.handle('walkthrough:run', (_e, a: { modelKey: string; level: WalkthroughLevel }) => startWalkthrough(a.modelKey, a.level))
+  ipcMain.handle('walkthrough:ask', (_e, a: { modelKey: string; level: WalkthroughLevel; step: number; question: string }) => askWalkthroughStep(a))
   ipcMain.handle('claude:prompt', (_e, a: { modelKey: string; threadIds: number[]; note: string }) => {
     const s = reviewService()
     return buildFixPrompt(s, s.model(a.modelKey), a.threadIds, a.note, settings.workspace)
@@ -269,6 +385,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('mcp:info', () => mcpInfo)
   ipcMain.handle('update:get', () => updateInfo())
+  ipcMain.on('load:cancel', () => service?.cancelLoads())
   ipcMain.on('update:check', () => void checkForUpdates())
   ipcMain.on('update:install', () => installUpdate())
   ipcMain.on('selection', (_e, next: Selection) => {
@@ -365,6 +482,7 @@ app.whenReady().then(async () => {
   summaries = loadJson(summariesFile(), {})
   explanations = loadExplanations()
   preReviews = loadJson(preReviewsFile(), {})
+  walkthroughs = loadJson(walkthroughsFile(), {})
   drafts = loadJson<Draft[]>(draftsFile(), [])
   const modules = join(app.getAppPath(), 'node_modules')
   await initParsers(join(modules, 'web-tree-sitter', 'web-tree-sitter.wasm'), {

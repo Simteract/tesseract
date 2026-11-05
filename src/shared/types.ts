@@ -280,12 +280,66 @@ export interface PreReviewStatus {
   result?: PreReview
 }
 
+/** 'new' teaches the domain and the old behavior first. 'familiar' starts at what changed. */
+export type WalkthroughLevel = 'new' | 'familiar'
+
+export type WalkthroughStepKind = 'overview' | 'concept' | 'change' | 'blueprint'
+
+/** A follow-up question of the reviewer about one step, with the answer of Claude. */
+export interface WalkthroughAnswer {
+  question: string
+  answer: string
+}
+
+export interface WalkthroughStep {
+  /** A purpose title in the form of a goal, e.g. "Understand how the cache is filled". */
+  title: string
+  kind: WalkthroughStepKind
+  /** The units that the step explains, in reading order. Overview and concept steps can have none. */
+  nodeIds: string[]
+  text: string
+  /** Questions that the reviewer answers by reading the code. They keep the reviewer active. */
+  checks: string[]
+  answers: WalkthroughAnswer[]
+}
+
+export interface Walkthrough {
+  createdAt: string
+  level: WalkthroughLevel
+  steps: WalkthroughStep[]
+  recap: string
+  /** Changed units that no step names. The reviewer reads them without help. */
+  uncovered: string[]
+}
+
+/** A walkthrough runs while startedAt is set. A finished run carries its result, a failed run has none. */
+export interface WalkthroughStatus {
+  modelKey: string
+  level: WalkthroughLevel
+  startedAt?: number
+  result?: Walkthrough
+}
+
+/** The data that the main process saves on disk. Each kind can be cleared on its own in Settings. */
+export type StoreKind = 'explanations' | 'summaries' | 'prereviews' | 'walkthroughs' | 'drafts' | 'revisions'
+
+/** Count is the number of saved entries, or of files for the revision cache. */
+export interface StoreSize {
+  count: number
+  bytes: number
+}
+
 /** The status label of a long task. Done and total are set when the task can count its steps, for example downloads. */
 export interface Progress {
   message: string
   done?: number
   total?: number
+  /** True while a review load runs, so the status bar can offer Cancel. */
+  cancellable?: boolean
 }
+
+/** The error text of a load that the user cancelled. The window shows it as a notice, not as an error. */
+export const LOAD_CANCELLED = 'Loading was cancelled'
 
 export interface Api {
   getSettings(): Promise<Settings>
@@ -312,15 +366,25 @@ export interface Api {
   explainContext(args: { modelKey: string; nodeIds: string[]; force?: boolean }): Promise<Record<string, Explanation>>
   /** Deletes the saved explanations of the units and returns the explanations that stay. */
   clearExplanations(args: { modelKey: string; nodeIds: string[] }): Promise<Record<string, Explanation>>
-  /** Deletes all saved AI results of all reviews: explanations, cluster summaries and pre-reviews. */
-  clearAiResults(): Promise<void>
+  /** The size of each store that the app keeps on disk. */
+  storeSizes(): Promise<Record<StoreKind, StoreSize>>
+  /** Deletes the content of the stores for all reviews. */
+  clearStores(kinds: StoreKind[]): Promise<void>
   /** The saved pre-review of the current revisions, if there is one. */
   getPreReview(modelKey: string): Promise<PreReview | null>
   runPreReview(modelKey: string): Promise<PreReview>
   onPreReview(listener: (status: PreReviewStatus) => void): () => void
+  /** The saved walkthrough of the current revisions at this level, if there is one. */
+  getWalkthrough(args: { modelKey: string; level: WalkthroughLevel }): Promise<Walkthrough | null>
+  runWalkthrough(args: { modelKey: string; level: WalkthroughLevel }): Promise<Walkthrough>
+  onWalkthrough(listener: (status: WalkthroughStatus) => void): () => void
+  /** Asks Claude a follow-up question about one step. Returns the walkthrough with the new answer. */
+  askWalkthrough(args: { modelKey: string; level: WalkthroughLevel; step: number; question: string }): Promise<Walkthrough>
   buildClaudePrompt(args: { modelKey: string; threadIds: number[]; note: string }): Promise<string>
   sendToClaude(args: { modelKey: string; threadIds: number[]; note: string; ignoreBranch: boolean }): Promise<ClaudeLaunchResult>
   onProgress(listener: (progress: Progress) => void): () => void
+  /** Stops the running review loads. Their load calls then fail with LOAD_CANCELLED. */
+  cancelLoad(): void
   getMcpInfo(): Promise<McpInfo>
   getUpdate(): Promise<UpdateInfo>
   onUpdate(listener: (info: UpdateInfo) => void): () => void

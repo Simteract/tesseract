@@ -19,7 +19,48 @@ export function writeReviewed(key: string, ids: Set<string>): void {
   }
 }
 
-export type LeftPanel = 'reviews' | 'prereview' | 'discussion'
+/** The walkthrough steps that the reviewer marked as understood, by index. The key holds the level and the creation time, so a new run starts empty. */
+export function readStepsDone(key: string): Set<number> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(`walkthrough-done:${key}`) ?? '[]') as number[])
+  } catch {
+    return new Set()
+  }
+}
+
+export function writeStepsDone(key: string, steps: Set<number>): void {
+  try {
+    localStorage.setItem(`walkthrough-done:${key}`, JSON.stringify([...steps]))
+  } catch {
+    return
+  }
+}
+
+const MARK_PREFIXES = ['reviewed:', 'walkthrough-done:']
+
+/** The keys of the reviewed marks and the walkthrough "Got it" marks of all reviews. */
+function markKeys(): string[] {
+  try {
+    return Object.keys(localStorage).filter((key) => MARK_PREFIXES.some((prefix) => key.startsWith(prefix)))
+  } catch {
+    return []
+  }
+}
+
+/** The number of reviews and walkthroughs with saved marks. */
+export function countMarks(): number {
+  return markKeys().length
+}
+
+export function clearMarks(): void {
+  try {
+    for (const key of markKeys()) localStorage.removeItem(key)
+  } catch {
+    return
+  }
+}
+
+export type LeftPanel = 'reviews' | 'prereview' | 'walkthrough' | 'discussion'
 
 export interface Layout {
   /** Width of the left panel. The name stays for the stored layouts from before the activity bar. */

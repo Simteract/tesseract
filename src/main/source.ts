@@ -31,7 +31,8 @@ export interface ReviewSource {
   /** The changes in the workspace that are not pushed or checked in yet. The head side of a file is the file on disk. */
   readLocal(range?: CommitRange): Promise<ReviewTarget>
   /** Writes each revision to dir/<revId>. Revisions that are already there are not read again. onProgress counts only the revisions to download. */
-  fetchRevisions(revIds: number[], dir: string, onProgress?: DownloadProgress): Promise<void>
+  /** The signal stops the download between batches, so no file is left half written. */
+  fetchRevisions(revIds: number[], dir: string, onProgress?: DownloadProgress, signal?: AbortSignal): Promise<void>
   /** All comments of a review. Each comment on a file has its file path set. */
   comments(reviewId: number): Promise<ReviewComment[]>
   reviewers(reviewId: number): Promise<Reviewer[]>
@@ -110,8 +111,8 @@ export class PlasticSource implements ReviewSource {
     return { branch, commits: [], files }
   }
 
-  fetchRevisions(revIds: number[], dir: string, onProgress?: DownloadProgress): Promise<void> {
-    return this.cm.fetchRevisions(this.local.fetch(revIds, dir), dir, onProgress)
+  fetchRevisions(revIds: number[], dir: string, onProgress?: DownloadProgress, signal?: AbortSignal): Promise<void> {
+    return this.cm.fetchRevisions(this.local.fetch(revIds, dir), dir, onProgress, signal)
   }
 
   async comments(reviewId: number): Promise<ReviewComment[]> {

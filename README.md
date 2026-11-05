@@ -98,8 +98,9 @@ Context code is often new to the reviewer.
   "Called by" link.
 - The explanations are saved. A new revision of the file makes them stale.
 - "Clear" next to an explanation deletes it, and "Clear explanations" in the cluster box deletes
-  those of the cluster. "Clear all" in the ⚙ popup deletes all saved AI results of all reviews:
-  explanations, cluster summaries and pre-reviews.
+  those of the cluster. "Saved data" in the ⚙ popup shows the size of each kind of saved data.
+  Check the kinds to delete, for example explanations, summaries, pre-reviews, walkthroughs or
+  downloaded files, and click "Clear checked". This deletes them for all reviews.
 
 ### 5. Comments inside the code
 
@@ -149,9 +150,30 @@ changed behavior that other code depends on.
   questions. You edit the drafts in the Threads panel, then post or discard them.
 - The result is saved. A new revision of a file makes it stale.
 
-### 8. MCP server for AI tools
+### 8. Walkthrough of a change
 
-![AI draft](docs/media/8-mcp-ai-draft.webp)
+Open the Walk panel (`w`), pick a level, and click "Walk me through". Claude teaches you the change
+in short steps, so you understand it before you judge it. This helps most when you do not know the
+code.
+
+- "New to this code" first explains the existing code and the ideas that the change builds on. "I
+  know this code" goes straight to what changed and why. Each level keeps its own result.
+- The first step is an overview. Then come concept steps, and then one step for each group of
+  related changes. Blueprint changes get their own steps.
+- Each step has a title that says its goal, a short text, and the units it explains. Opening a
+  step selects its first unit, so the code shows it. In the graph, the units of the step get a
+  bright halo and a double border.
+- Each step ends with "Check this yourself" questions. You answer them by reading the code. They
+  keep you reading the code instead of only the text.
+- "Ask" sends Claude a question about the step. The answer stays with the step.
+- "Got it" marks a step as understood. `n` and `p` move between the steps while the panel is open.
+- The last page is a recap, with the changed units that no step covers. Read those without help.
+- While the panel is open, the AI pre-review marks are hidden, so they do not steer what you read.
+- The result is saved. A new revision of a file makes it stale.
+
+### 9. MCP server for AI tools
+
+![AI draft](docs/media/9-mcp-ai-draft.webp)
 
 The app runs an MCP server on `http://127.0.0.1:47821/mcp`. An AI tool such as Claude Code can use
 it to read the review that is open in the app:
@@ -200,13 +222,14 @@ diff, added code is blue and removed code is orange.
 | Hover an arrow | Show the two units that it connects |
 | Click an arrow | Select the unit that it points to. When that unit is already selected, select the unit at the other end. |
 | Left button drag on a node | Move the node |
-| `n` / `p` | Next / previous unit on the reading path |
+| `n` / `p` | Next / previous unit on the reading path. With a walkthrough open: next / previous step. |
 | `Shift+N` / `Shift+P` | Next / previous cluster (backwards, first to the start of the current cluster) |
 | `Home` / `End` | First / last unit on the reading path |
 | `h` / `Shift+H` | Next / previous unit that the AI pre-review flagged |
 | `r` | Mark the selected unit as reviewed |
 | `d` | Show or hide the Threads panel |
 | `a` | Show or hide the AI check panel |
+| `w` | Show or hide the Walk panel |
 | `g` | Show or hide the graph. Without the graph, the code panel uses the full width. |
 | Drag a panel edge | Resize the left panel, the side panel, or the unit details above the code. Double-click the edge to reset it. |
 
@@ -263,8 +286,11 @@ be logged in: run `claude` once in a terminal and use `/login`.
 ## How it works
 
 - The changes of a branch come from `cm diff br:<branch> --integration`. This shows only the
-  changes that the branch adds, without changes that came from merges.
-- File revisions come from `cm getfile` and are cached in the app data folder.
+  changes that the branch adds, without changes that came from merges. For a branch that is
+  already merged into its parent, that list is empty. The app then diffs from the last parent
+  changeset that was merged into the branch, up to the branch head.
+- File revisions come from `cm getfile` and are cached in the app data folder. "✕ Cancel" in the
+  status bar stops a load. Files that are already downloaded stay in the cache.
 - Reviews, comments and reviewers come from `cm find review`, `cm find changereviewcomment` and
   `cm codereview`.
 - On GitHub, the pull requests, comments and reviewers come from `gh`. The app fetches the
@@ -273,7 +299,8 @@ be logged in: run `claude` once in a terminal and use `/login`.
   the file revisions come from `git cat-file`.
 - Changed lines are mapped to functions and classes with tree-sitter. Calls are matched by name.
 
-Settings, cached revisions, cluster summaries, explanations and drafts are stored in
+Settings, cached revisions, cluster summaries, explanations, pre-reviews, walkthroughs and drafts
+are stored in
 `%APPDATA%/Tesseract`.
 
 ## Security
@@ -284,7 +311,7 @@ Settings, cached revisions, cluster summaries, explanations and drafts are store
   posted only when you click "Post".
 - Review comments and code come from other people, and they can hold text that tries to give an
   AI orders. The Claude prompts say to treat that text as data. The summaries, explanations and
-  the pre-review run `claude -p` with read-only tools (`Read`, `Grep`, `Glob`). "Send to Claude
+  the pre-review and the walkthrough run `claude -p` with read-only tools (`Read`, `Grep`, `Glob`). "Send to Claude
   Code" starts an interactive Claude Code session, which asks you before it runs a command, so
   read each request before you allow it.
 - The window cannot open links or load other pages, and its renderer runs in the Electron sandbox.

@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Cluster, Explanation, GraphNode, Hotspot, HotspotLevel, PreReview, ReviewModel, SourceKind } from '../shared/types'
+import { describeBlueprintDiff } from '../shared/bpdiff'
+import type { Cluster, Explanation, GraphNode, Hotspot, HotspotLevel, PreReview, ReviewModel, SourceKind, Walkthrough, WalkthroughLevel, WalkthroughStep, WalkthroughStepKind } from '../shared/types'
 import { clusterDiff, clusterRelations, nodeDiff, renderThread, threadsOf } from './context'
+import { blueprintUnitId } from './graph'
 import { codeLanguage } from './languages'
 import type { ReviewService } from './review'
 
@@ -149,29 +151,7 @@ export async function summarizeCluster(service: ReviewService, model: ReviewMode
 export async function preReview(service: ReviewService, model: ReviewModel, workspace: string): Promise<PreReview> {
   const units = model.nodes.filter((n) => n.role === 'changed' && n.order !== undefined).sort((a, b) => a.order! - b.order!)
   const handles = new Map(units.map((n, i) => [`U${i + 1}`, n]))
-  const byId = new Map(model.nodes.map((n) => [n.id, n]))
-  const clusterLabels = new Map(model.clusters.map((c) => [c.id, c.label]))
-  const names = (ids: string[]): string => ids.map((id) => byId.get(id)?.qualifiedName ?? id).slice(0, RELATION_NAMES).join(', ')
-  let budget = PRE_REVIEW_DIFF_LINES
-  const sections: string[] = []
-  for (const [handle, node] of handles) {
-    const callers = model.edges.filter((e) => e.kind === 'calls' && e.target === node.id).map((e) => e.source)
-    const calls = model.edges.filter((e) => e.kind === 'calls' && e.source === node.id).map((e) => e.target)
-    sections.push(
-      '',
-      `### ${handle} ${node.qualifiedName}`,
-      `${node.file}:${node.startLine}-${node.endLine}, ${node.kind}, +${node.added} -${node.removed}${node.side === 'base' ? ', deleted' : ''}, cluster: ${clusterLabels.get(node.clusterId ?? '') ?? 'none'}`,
-      callers.length ? `Called by: ${names(callers)}` : '',
-      calls.length ? `Calls: ${names(calls)}` : ''
-    )
-    const diff = nodeDiff(service, model, node)
-    if (budget <= 0) sections.push('(diff left out: the prompt is full)')
-    else {
-      const shown = diff.slice(0, Math.min(UNIT_DIFF_LINES, budget))
-      budget -= shown.length
-      sections.push('```diff', ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
-    }
-  }
+  const sections = changedUnitSections(service, model, handles)
   const prompt = [
     `You do a first pass of a code review in ${projectKind(model)}, to guide a human reviewer.`,
     `Branch: ${model.branch}.${model.review ? ` Review: ${model.review.title}.` : ''}`,
@@ -195,6 +175,205 @@ export async function preReview(service: ReviewService, model: ReviewModel, work
     .join('\n')
   const answer = await runClaudePrint(prompt, workspace, PRE_REVIEW_TIMEOUT_MS, PRE_REVIEW_TURNS)
   return parsePreReview(answer, handles)
+}
+
+/**
+ * Lists each changed unit with its handle, place, relations and diff, until the diff budget runs out.
+ * A Blueprint unit gets the text form of its graph diff, because a text diff of a .uasset file is noise.
+ */
+function changedUnitSections(service: ReviewService, model: ReviewModel, handles: Map<string, GraphNode>): string[] {
+  const byId = new Map(model.nodes.map((n) => [n.id, n]))
+  const clusterLabels = new Map(model.clusters.map((c) => [c.id, c.label]))
+  const names = (ids: string[]): string => ids.map((id) => byId.get(id)?.qualifiedName ?? id).slice(0, RELATION_NAMES).join(', ')
+  let budget = PRE_REVIEW_DIFF_LINES
+  const sections: string[] = []
+  for (const [handle, node] of handles) {
+    const callers = model.edges.filter((e) => e.kind === 'calls' && e.target === node.id).map((e) => e.source)
+    const calls = model.edges.filter((e) => e.kind === 'calls' && e.source === node.id).map((e) => e.target)
+    sections.push(
+      '',
+      `### ${handle} ${node.qualifiedName}`,
+      `${node.file}:${node.startLine}-${node.endLine}, ${node.kind}, +${node.added} -${node.removed}${node.side === 'base' ? ', deleted' : ''}, cluster: ${clusterLabels.get(node.clusterId ?? '') ?? 'none'}`,
+      callers.length ? `Called by: ${names(callers)}` : '',
+      calls.length ? `Calls: ${names(calls)}` : ''
+    )
+    const blueprint = node.kind === 'blueprint'
+    const diff = blueprint ? blueprintUnitDiff(service, model, node) : nodeDiff(service, model, node)
+    if (budget <= 0) sections.push('(diff left out: the prompt is full)')
+    else {
+      const shown = diff.slice(0, Math.min(UNIT_DIFF_LINES, budget))
+      budget -= shown.length
+      sections.push(blueprint ? '```text' : '```diff', ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
+    }
+  }
+  return sections
+}
+
+/** The text form of the Blueprint diff of one graph. The node is one graph of a .uasset file. */
+function blueprintUnitDiff(service: ReviewService, model: ReviewModel, node: GraphNode): string[] {
+  const file = model.files.find((f) => f.path === node.file)
+  if (!file) return []
+  const graphs = service.blueprintDiff(file).filter((g) => blueprintUnitId(file.path, g.name) === node.id)
+  return describeBlueprintDiff(file.path, graphs).split('\n')
+}
+
+/** Walkthroughs read the whole change and look up definitions, like a pre-review. */
+const WALKTHROUGH_TIMEOUT_MS = 900_000
+const WALKTHROUGH_TURNS = 25
+
+/** Context units named in a walkthrough prompt. The units with the most links to changed code come first. */
+const WALKTHROUGH_CONTEXT_UNITS = 40
+
+const MAX_WALKTHROUGH_STEPS = 14
+
+const WALKTHROUGH_KINDS: WalkthroughStepKind[] = ['overview', 'concept', 'change', 'blueprint']
+
+const LEVEL_RULES: Record<WalkthroughLevel, string> = {
+  new: 'The reviewer does not know this code. Before the change steps, explain the parts of the existing code and of the domain that the reviewer needs: what the code did before the change, the names it uses, and the data it moves. Use 1 to 3 concept steps for this.',
+  familiar:
+    'The reviewer knows this code well. Do not explain basics or the existing design. Use at most 1 concept step, and only for an idea that is new in this change. Go straight to what changed, why, and what it affects.'
+}
+
+/** Results that the app already saved for the model. The walkthrough prompt reuses them, so Claude does not redo that work. */
+export interface WalkthroughKnown {
+  clusterSummaries: Map<string, string>
+  explanations: Record<string, Explanation>
+}
+
+/**
+ * Asks Claude for a step by step lesson over the change. Each step has a purpose title, the units it
+ * explains, and questions that make the reviewer read the code. Changed units get U handles and context
+ * units get C handles, for the same reason as in preReview.
+ */
+export async function walkthrough(service: ReviewService, model: ReviewModel, workspace: string, level: WalkthroughLevel, known: WalkthroughKnown): Promise<Walkthrough> {
+  const units = model.nodes.filter((n) => n.role === 'changed' && n.order !== undefined).sort((a, b) => a.order! - b.order!)
+  const changed = new Map(units.map((n, i) => [`U${i + 1}`, n]))
+  const changedIds = new Set(units.map((n) => n.id))
+  const links = (node: GraphNode): number => model.edges.filter((e) => (e.source === node.id && changedIds.has(e.target)) || (e.target === node.id && changedIds.has(e.source))).length
+  const context = model.nodes
+    .filter((n) => n.role === 'context')
+    .map((n) => ({ node: n, links: links(n) }))
+    .filter((c) => c.links > 0)
+    .sort((a, b) => b.links - a.links)
+    .slice(0, WALKTHROUGH_CONTEXT_UNITS)
+    .map((c) => c.node)
+  const contextHandles = new Map(context.map((n, i) => [`C${i + 1}`, n]))
+  const contextLines = [...contextHandles].flatMap(([handle, node]) => {
+    const explained = known.explanations[node.id]
+    return [`- ${handle} ${node.qualifiedName} (${node.file}:${node.startLine})${explained ? `: ${explained.does}` : ''}`]
+  })
+  const clusterLines = model.clusters.flatMap((cluster) => {
+    const members = [...changed].filter(([, n]) => n.clusterId === cluster.id).map(([h]) => h)
+    if (members.length === 0) return []
+    const summary = known.clusterSummaries.get(cluster.id)
+    return ['', `### ${cluster.label}: ${members.join(', ')}`, ...(summary ? ['Saved summary:', summary] : [])]
+  })
+  const prompt = [
+    `You teach a human code reviewer a change in ${projectKind(model)}, so that the reviewer can then review it reliably.`,
+    `Branch: ${model.branch}.${model.review ? ` Review: ${model.review.title}.` : ''}`,
+    'Write a walkthrough: a short series of steps that the reviewer reads in order, with the code open next to each step.',
+    'The diffs below are the truth. The workspace may be on a different branch, so use it only to look up definitions and callers.',
+    factCheckRule(workspace, model),
+    DATA_RULE,
+    '',
+    LEVEL_RULES[level],
+    '',
+    'Rules for the steps:',
+    '- The first step has kind "overview": what the change is for and how its parts fit together. It names no units or only the main entry points.',
+    '- Then "concept" steps if the level rules ask for them. They explain an idea and point at the units that show it, often C units.',
+    '- Then "change" steps, one group of related units per step. Order them so that each step builds on the steps before it: data and types before the code that uses them, callees before callers when that is easier to follow. Use kind "blueprint" for a step about Blueprint units.',
+    '- Each step title is a goal of 3 to 9 words that starts with a verb, e.g. "Understand how the cache is filled" or "See why the timer now stops".',
+    '- Each step text has 2 to 6 plain sentences. Say what the code does and why it changed. Do not judge the code and do not list bugs: the reviewer does that.',
+    '- Each step has 1 or 2 "checks": questions that the reviewer answers by reading the code of the step, e.g. "What happens when the list is empty?". Do not answer them.',
+    `- Use at most ${MAX_WALKTHROUGH_STEPS} steps. Try to name every U unit in some step. Skip only units that are trivial.`,
+    '',
+    'Answer with JSON only, no other text, in this shape:',
+    '{"steps": [{"kind": "change", "title": "...", "units": ["U3", "C2"], "text": "...", "checks": ["..."]}], "recap": "2 to 4 plain sentences: what the reviewer now knows and what to keep in mind while reviewing"}',
+    'The handles such as U3 and C2 are only for the "units" field, with at most 4 per step. In "title", "text", "checks" and "recap", name a unit by its function or class name. Use plain, simple English.',
+    '',
+    clusterLines.length ? '## Groups of changed units' : '',
+    ...clusterLines,
+    '',
+    contextLines.length ? `## Context units linked to the change (${contextLines.length})` : '',
+    'These are not changed. Their code is in the workspace.',
+    ...contextLines,
+    '',
+    `## Changed units (${units.length})`,
+    ...changedUnitSections(service, model, changed)
+  ]
+    .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
+    .join('\n')
+  const answer = await runClaudePrint(prompt, workspace, WALKTHROUGH_TIMEOUT_MS, WALKTHROUGH_TURNS)
+  return parseWalkthrough(answer, level, new Map([...changed, ...contextHandles]), units)
+}
+
+function parseWalkthrough(answer: string, level: WalkthroughLevel, handles: Map<string, GraphNode>, changed: GraphNode[]): Walkthrough {
+  const parsed = parseJson<{ steps?: unknown; recap?: unknown }>(answer)
+  const named = (text: unknown): string => String(text ?? '').replace(/\b[UC]\d+\b/g, (handle) => handles.get(handle)?.qualifiedName ?? handle).trim()
+  const steps: WalkthroughStep[] = []
+  for (const item of Array.isArray(parsed.steps) ? parsed.steps : []) {
+    const units = Array.isArray(item?.units) ? item.units : []
+    const nodeIds = [...new Set(units.map((u: unknown) => handles.get(String(u).trim().toUpperCase())?.id).filter((id: string | undefined) => id !== undefined))] as string[]
+    const kind = WALKTHROUGH_KINDS.find((k) => k === String(item?.kind).toLowerCase()) ?? 'change'
+    const checks = (Array.isArray(item?.checks) ? item.checks : []).map(named).filter((c: string) => c)
+    const title = named(item?.title)
+    const text = named(item?.text)
+    if (title && text) steps.push({ title, kind, nodeIds, text, checks, answers: [] })
+  }
+  if (steps.length === 0) throw new Error(`Claude gave no walkthrough steps: ${answer.slice(0, 300)}`)
+  const covered = new Set(steps.flatMap((s) => s.nodeIds))
+  const uncovered = changed.filter((n) => !covered.has(n.id)).map((n) => n.id)
+  return { createdAt: new Date().toISOString(), level, steps, recap: named(parsed.recap), uncovered }
+}
+
+const ASK_TIMEOUT_MS = 300_000
+const ASK_TURNS = 12
+
+/** Answers one follow-up question about a walkthrough step. The prompt holds the step, its diffs and the earlier answers. */
+export async function askWalkthrough(service: ReviewService, model: ReviewModel, workspace: string, walk: Walkthrough, stepIndex: number, question: string): Promise<string> {
+  const step = walk.steps[stepIndex]
+  if (!step) throw new Error('Unknown walkthrough step')
+  const byId = new Map(model.nodes.map((n) => [n.id, n]))
+  const nodes = step.nodeIds.map((id) => byId.get(id)).filter((n) => n !== undefined)
+  const changed = new Map(nodes.filter((n) => n.role === 'changed').map((n, i) => [`U${i + 1}`, n]))
+  const contextNames = nodes.filter((n) => n.role === 'context').map((n) => `- ${n.qualifiedName} (${n.file}:${n.startLine}-${n.endLine})`)
+  const prompt = [
+    `You teach a human code reviewer a change in ${projectKind(model)}. The reviewer reads a walkthrough of the change and asks about one step.`,
+    `Branch: ${model.branch}.${model.review ? ` Review: ${model.review.title}.` : ''}`,
+    'The diffs below are the truth. The workspace may be on a different branch, so use it only to look up definitions and callers.',
+    factCheckRule(workspace, model),
+    DATA_RULE,
+    '',
+    'Answer the question in plain, simple English, in at most 150 words. Name units by their function or class name. If the question asks you to judge the code, give the facts the reviewer needs and let the reviewer decide.',
+    '',
+    `## Overview of the walkthrough`,
+    walk.steps[0]?.text ?? '',
+    '',
+    `## The step: ${step.title}`,
+    step.text,
+    ...(step.checks.length ? ['', 'Checks for the reviewer:', ...step.checks.map((c) => `- ${c}`)] : []),
+    ...step.answers.flatMap((a) => ['', `Earlier question: ${a.question}`, `Earlier answer: ${a.answer}`]),
+    '',
+    `## The question of the reviewer`,
+    question.trim(),
+    '',
+    contextNames.length ? '## Context units of the step (not changed, code in the workspace)' : '',
+    ...contextNames,
+    '',
+    changed.size ? '## Changed units of the step' : '',
+    ...changedUnitSections(service, model, changed)
+  ]
+    .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
+    .join('\n')
+  return runClaudePrint(prompt, workspace, ASK_TIMEOUT_MS, ASK_TURNS)
+}
+
+function parseJson<T>(answer: string): T {
+  try {
+    return JSON.parse(answer.slice(answer.indexOf('{'), answer.lastIndexOf('}') + 1))
+  } catch {
+    throw new Error(`Claude did not answer with JSON: ${answer.slice(0, 300)}`)
+  }
 }
 
 /** Upper limit of code lines per unit in an explain prompt. Long units are cut. */

@@ -1,5 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CommitRange, Draft, Explanation, GraphNode, HotspotLevel, PreReview, Progress, ReviewComment, ReviewModel, Settings } from '../../shared/types'
+import {
+  type CommitRange,
+  type Draft,
+  type Explanation,
+  type GraphNode,
+  type HotspotLevel,
+  LOAD_CANCELLED,
+  type PreReview,
+  type Progress,
+  type ReviewComment,
+  type ReviewModel,
+  type Settings,
+  type Walkthrough,
+  type WalkthroughLevel
+} from '../../shared/types'
 import { BlueprintPanel } from './BlueprintPanel'
 import { CodePanel } from './CodePanel'
 import { CommitsMenu } from './CommitsMenu'
@@ -13,8 +27,9 @@ import { ReviewStatus } from './ReviewStatus'
 import { SettingsMenu } from './SettingsMenu'
 import { Splitter } from './Splitter'
 import { StatusBar } from './StatusBar'
+import { WalkthroughPanel } from './WalkthroughPanel'
 import { WorkspacePicker } from './WorkspacePicker'
-import { DEFAULT_LAYOUT, nodeForComment, parseOpenTarget, readLayout, readReviewed, writeLayout, writeReviewed, type Layout, type LeftPanel } from './util'
+import { DEFAULT_LAYOUT, nodeForComment, parseOpenTarget, readLayout, readReviewed, readStepsDone, writeLayout, writeReviewed, writeStepsDone, type Layout, type LeftPanel } from './util'
 
 /** The graph keeps at least this width, so a wide side panel cannot push it out of the window. */
 const MIN_GRAPH_WIDTH = 200
@@ -40,6 +55,10 @@ function useElapsedSeconds(startedAt: number | undefined): number {
   return startedAt === undefined ? 0 : Math.max(0, Math.floor((now - startedAt) / 1000))
 }
 
+function walkKey(modelKey: string, level: WalkthroughLevel): string {
+  return `${modelKey}|${level}`
+}
+
 export interface CommentTarget {
   path: string
   line: number
@@ -63,6 +82,13 @@ export function App(): React.JSX.Element {
   /** Claude explanations of context units, by node id. The model key keeps a late answer away from another review. */
   const [explanations, setExplanations] = useState<{ modelKey: string; byId: Record<string, Explanation> }>()
   const [explaining, setExplaining] = useState<Set<string>>(new Set())
+  const [walkLevel, setWalkLevel] = useState<WalkthroughLevel>('new')
+  /** Saved walkthroughs, by walkKey. */
+  const [walkthroughs, setWalkthroughs] = useState<Record<string, Walkthrough>>({})
+  /** Start time of each running walkthrough, by walkKey. */
+  const [walking, setWalking] = useState<Record<string, number>>({})
+  const [walkPosition, setWalkPosition] = useState(0)
+  const [stepsDone, setStepsDone] = useState<Set<number>>(new Set())
   const side = useRef<HTMLElement>(null)
 
   useEffect(
@@ -70,6 +96,16 @@ export function App(): React.JSX.Element {
       window.api.onPreReview(({ modelKey, startedAt, result }) => {
         setPreReviewing(({ [modelKey]: _, ...rest }) => (startedAt ? { ...rest, [modelKey]: startedAt } : rest))
         if (result) setPreReview({ modelKey, result })
+      }),
+    []
+  )
+
+  useEffect(
+    () =>
+      window.api.onWalkthrough(({ modelKey, level, startedAt, result }) => {
+        const key = walkKey(modelKey, level)
+        setWalking(({ [key]: _, ...rest }) => (startedAt ? { ...rest, [key]: startedAt } : rest))
+        if (result) setWalkthroughs((current) => ({ ...current, [key]: result }))
       }),
     []
   )
@@ -93,7 +129,9 @@ export function App(): React.JSX.Element {
     try {
       return await task()
     } catch (e) {
-      setError(e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e))
+      const message = e instanceof Error ? e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') : String(e)
+      if (message === LOAD_CANCELLED) setNotice(`${LOAD_CANCELLED}.`)
+      else setError(message)
       setProgress(undefined)
       return undefined
     }
@@ -121,9 +159,11 @@ export function App(): React.JSX.Element {
   }, [])
 
   /** Opens the same review again with only the commits of the range. No range opens all commits. */
-  const openRange = (current: ReviewModel, range: CommitRange | undefined): void => {
+  const openRange = (current: ReviewModel, range: CommitRange | undefined, keepId?: string): void => {
     const review = current.review
-    run(() => (review ? window.api.loadReview(review.id, range) : current.local ? window.api.loadLocal(range) : window.api.loadBranch(current.branch, range))).then((next) => openModel(next))
+    run(() => (review ? window.api.loadReview(review.id, range) : current.local ? window.api.loadLocal(range) : window.api.loadBranch(current.branch, range))).then((next) =>
+      openModel(next, keepId)
+    )
   }
 
   /** Reads the local changes again, because the files on disk change while the user reviews them. */
@@ -228,6 +268,62 @@ export function App(): React.JSX.Element {
   const preReviewStartedAt = model ? preReviewing[model.key] : undefined
   const preReviewSeconds = useElapsedSeconds(preReviewStartedAt)
 
+  const currentWalkKey = model ? walkKey(model.key, walkLevel) : undefined
+  const walk = currentWalkKey ? walkthroughs[currentWalkKey] : undefined
+  const walkStartedAt = currentWalkKey ? walking[currentWalkKey] : undefined
+  const walkSeconds = useElapsedSeconds(walkStartedAt)
+  const walkOpen = layout.leftPanel === 'walkthrough' && !!walk
+  /** The "Got it" marks belong to one run, so a new run of the same level starts without marks. */
+  const doneKey = currentWalkKey && walk ? `${currentWalkKey}|${walk.createdAt}` : undefined
+
+  useEffect(() => {
+    if (!model) return
+    const modelKey = model.key
+    window.api.getWalkthrough({ modelKey, level: walkLevel }).then((result) => {
+      if (result) setWalkthroughs((current) => ({ ...current, [walkKey(modelKey, walkLevel)]: result }))
+    })
+  }, [model?.key, walkLevel])
+
+  useEffect(() => {
+    setWalkPosition(0)
+    setStepsDone(doneKey ? readStepsDone(doneKey) : new Set())
+  }, [doneKey])
+
+  /** Opens a walkthrough step and selects its first unit, so the code shows it. The recap page selects nothing. */
+  const goToStep = useCallback(
+    (index: number) => {
+      if (!walk) return
+      const next = Math.min(walk.steps.length, Math.max(0, index))
+      setWalkPosition(next)
+      const first = walk.steps[next]?.nodeIds[0]
+      if (first) setSelectedId(first)
+    },
+    [walk]
+  )
+
+  const stepUnits = useMemo(() => new Set(walkOpen ? (walk?.steps[walkPosition]?.nodeIds ?? []) : []), [walkOpen, walk, walkPosition])
+
+  const toggleStepDone = (index: number): void => {
+    if (!doneKey) return
+    const next = new Set(stepsDone)
+    if (next.has(index)) next.delete(index)
+    else next.add(index)
+    setStepsDone(next)
+    writeStepsDone(doneKey, next)
+  }
+
+  const askStep = async (index: number, question: string): Promise<void> => {
+    if (!model) return
+    const modelKey = model.key
+    const level = walkLevel
+    const result = await window.api.askWalkthrough({ modelKey, level, step: index, question })
+    setWalkthroughs((current) => ({ ...current, [walkKey(modelKey, level)]: result }))
+  }
+
+  /** AI pre-review tags stay hidden during a walkthrough, so they do not steer what the reviewer reads. */
+  const shownHotspots = useMemo(() => (walkOpen ? [] : hotspots), [walkOpen, hotspots])
+  const shownHotspotLevels = useMemo(() => (walkOpen ? new Map<string, HotspotLevel>() : hotspotLevels), [walkOpen, hotspotLevels])
+
   /** Moves through the flagged units in order of importance, and wraps around at the ends. */
   const stepHotspot = useCallback(
     (delta: number) => {
@@ -283,7 +379,9 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.target instanceof Element && e.target.closest('input, textarea, select, .monaco-editor')) return
-      if (e.key === 'n') step(1)
+      if (e.key === 'n' && walkOpen) goToStep(walkPosition + 1)
+      else if (e.key === 'p' && walkOpen) goToStep(walkPosition - 1)
+      else if (e.key === 'n') step(1)
       else if (e.key === 'p') step(-1)
       else if (e.key === 'N') stepCluster(1)
       else if (e.key === 'P') stepCluster(-1)
@@ -292,13 +390,14 @@ export function App(): React.JSX.Element {
       else if (e.key === 'r' && selectedNode?.role === 'changed') toggleReviewed(selectedNode.id)
       else if (e.key === 'd') togglePanel('discussion')
       else if (e.key === 'a') togglePanel('prereview')
+      else if (e.key === 'w') togglePanel('walkthrough')
       else if (e.key === 'g') toggleGraph()
-      else if (e.key === 'h') stepHotspot(1)
-      else if (e.key === 'H') stepHotspot(-1)
+      else if (e.key === 'h' && !walkOpen) stepHotspot(1)
+      else if (e.key === 'H' && !walkOpen) stepHotspot(-1)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [step, stepCluster, goTo, readingPath, toggleReviewed, selectedNode, toggleGraph, togglePanel, stepHotspot])
+  }, [step, stepCluster, goTo, readingPath, toggleReviewed, selectedNode, toggleGraph, togglePanel, stepHotspot, walkOpen, goToStep, walkPosition])
 
   const setComments = (comments: ReviewComment[] | undefined): void => {
     if (comments) setModel((current) => (current ? { ...current, comments } : current))
@@ -317,6 +416,10 @@ export function App(): React.JSX.Element {
 
   const runPreReview = (): void => {
     if (model) run(() => window.api.runPreReview(model.key))
+  }
+
+  const runWalkthrough = (): void => {
+    if (model) run(() => window.api.runWalkthrough({ modelKey: model.key, level: walkLevel }))
   }
 
   const modelDrafts = drafts.filter((d) => d.modelKey === model?.key)
@@ -352,9 +455,16 @@ export function App(): React.JSX.Element {
           settings={settings}
           run={run}
           onSettings={applySettings}
-          onAiCleared={() => {
-            setExplanations(undefined)
-            setPreReview(undefined)
+          onCleared={(kinds) => {
+            const cleared = new Set(kinds)
+            if (cleared.has('explanations')) setExplanations(undefined)
+            if (cleared.has('prereviews')) setPreReview(undefined)
+            if (cleared.has('walkthroughs')) setWalkthroughs({})
+            if (cleared.has('marks')) {
+              setReviewed(new Set())
+              setStepsDone(new Set())
+            }
+            if (cleared.has('revisions') && model) openRange(model, model.range, selectedId)
           }}
         />
         {model && (
@@ -384,6 +494,13 @@ export function App(): React.JSX.Element {
           'AI check',
           'AI pre-review: Claude flags the units to check first (a). Click again to hide the panel.',
           preReviewStartedAt ? <span className="spinner activity-badge" /> : hotspots.length > 0 ? <span className="activity-badge">{hotspots.length}</span> : undefined
+        )}
+        {activity(
+          'walkthrough',
+          '🧭',
+          'Walk',
+          'Walkthrough: Claude teaches the change step by step (w). Click again to hide the panel.',
+          walkStartedAt ? <span className="spinner activity-badge" /> : walk ? <span className="activity-badge">{walk.steps.length}</span> : undefined
         )}
         {activity(
           'discussion',
@@ -418,6 +535,27 @@ export function App(): React.JSX.Element {
                 const fields = list.map((h) => hotspotDraft(model, h)).filter((d) => d !== undefined)
                 if (fields.length) run(() => window.api.addDrafts(fields))
               }}
+            />
+          ) : (
+            <div className="empty">Open a review first.</div>
+          )}
+        </div>
+        <div className="left-panel-body" hidden={layout.leftPanel !== 'walkthrough'}>
+          {model ? (
+            <WalkthroughPanel
+              model={model}
+              walkthrough={walk}
+              level={walkLevel}
+              runningSeconds={walkStartedAt === undefined ? undefined : walkSeconds}
+              position={walkPosition}
+              done={stepsDone}
+              selectedId={selectedNode?.id}
+              onLevel={setWalkLevel}
+              onRun={runWalkthrough}
+              onPosition={goToStep}
+              onToggleDone={toggleStepDone}
+              onSelect={setSelectedId}
+              onAsk={askStep}
             />
           ) : (
             <div className="empty">Open a review first.</div>
@@ -459,10 +597,11 @@ export function App(): React.JSX.Element {
               model={model}
               selectedId={selectedId}
               reviewed={reviewed}
-              hotspots={hotspotLevels}
+              hotspots={shownHotspotLevels}
               explanations={modelExplanations}
               explaining={explaining}
               onExplain={explain}
+              stepUnits={stepUnits}
               onSelect={setSelectedId}
             />
           </>
@@ -488,7 +627,7 @@ export function App(): React.JSX.Element {
               clusters={model.clusters}
               selectedId={selectedNode?.id}
               reviewedIds={reviewed}
-              hotspots={hotspots}
+              hotspots={shownHotspots}
               onSelect={setSelectedId}
               position={position}
               total={readingPath.length}
@@ -506,7 +645,7 @@ export function App(): React.JSX.Element {
               node={selectedNode}
               cluster={selectedCluster}
               reviewed={reviewed}
-              preReview={modelPreReview}
+              preReview={walkOpen ? undefined : modelPreReview}
               drafts={modelDrafts}
               onDraftHotspots={(list) => {
                 const fields = list.map((h) => hotspotDraft(model, h)).filter((d) => d !== undefined)
@@ -536,7 +675,7 @@ export function App(): React.JSX.Element {
               <CodePanel
                 model={model}
                 node={codeNode}
-                hotspots={hotspots}
+                hotspots={shownHotspots}
                 run={run}
                 commentTarget={commentTarget}
                 onCommentLine={setCommentTarget}

@@ -77,6 +77,8 @@ interface Props {
   explanations: Record<string, Explanation>
   explaining: Set<string>
   onExplain(nodeIds: string[], force: boolean): void
+  /** The units of the open walkthrough step. They get a bright halo and do not fade. */
+  stepUnits?: Set<string>
   /** Called with undefined when the user clicks the empty background. */
   onSelect(id: string | undefined): void
 }
@@ -130,6 +132,7 @@ const STYLE: cytoscape.StylesheetJson = [
   { selector: 'node.hotspot-high', style: { 'underlay-color': LEVEL_COLOR.high, 'underlay-opacity': 0.75, 'underlay-padding': 9 } },
   { selector: 'node.hotspot-medium', style: { 'underlay-color': LEVEL_COLOR.medium, 'underlay-opacity': 0.6, 'underlay-padding': 7 } },
   { selector: 'node.hotspot-low', style: { 'underlay-color': LEVEL_COLOR.low, 'underlay-opacity': 0.5, 'underlay-padding': 5 } },
+  { selector: 'node.step-unit', style: { 'underlay-color': '#ffffff', 'underlay-opacity': 0.3, 'underlay-padding': 8, 'border-width': 3, 'border-style': 'double', opacity: 1 } },
   { selector: 'node.selected', style: { 'border-color': '#ffffff', 'border-width': 3, opacity: 1 } },
   {
     selector: 'edge',
@@ -186,10 +189,13 @@ function nodeLabel(
   return { label, w: Math.max(...lines.map((l) => l.length)) * 6.4 + 16, h: lines.length * 14 + 10 }
 }
 
-export function GraphView({ model, selectedId, reviewed, hotspots, explanations, explaining, onExplain, onSelect }: Props): React.JSX.Element {
+const NO_STEP_UNITS = new Set<string>()
+
+export function GraphView({ model, selectedId, reviewed, hotspots, explanations, explaining, onExplain, stepUnits = NO_STEP_UNITS, onSelect }: Props): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null)
   const cy = useRef<Core>(undefined)
   const focusedCluster = useRef<string>(undefined)
+  const focusedStep = useRef<string>(undefined)
   const selectRef = useRef(onSelect)
   selectRef.current = onSelect
   const selectedRef = useRef(selectedId)
@@ -288,10 +294,11 @@ export function GraphView({ model, selectedId, reviewed, hotspots, explanations,
     const instance = cy.current
     if (!instance) return
     instance.batch(() => {
-      instance.elements().removeClass('selected faded highlight reviewed has-comments hotspot-high hotspot-medium hotspot-low')
+      instance.elements().removeClass('selected faded highlight reviewed has-comments hotspot-high hotspot-medium hotspot-low step-unit')
       instance.nodes().forEach((n) => {
         const unit = nodesById.get(n.id())
         if (!unit) return
+        if (stepUnits.has(n.id())) n.addClass('step-unit')
         if (reviewed.has(n.id())) n.addClass('reviewed')
         if (commentCounts.has(n.id())) n.addClass('has-comments')
         const level = hotspots.get(n.id())
@@ -304,11 +311,21 @@ export function GraphView({ model, selectedId, reviewed, hotspots, explanations,
       selected.addClass('selected')
       if (selected.isParent()) return
       const near = selected.closedNeighborhood()
-      instance.elements().not(near).not(near.parents()).not(selected.parents()).addClass('faded')
+      const step = instance.nodes('.step-unit')
+      instance.elements().not(near).not(near.parents()).not(selected.parents()).not(step).not(step.parents()).addClass('faded')
       selected.connectedEdges().addClass('highlight')
     })
     const selected = selectedId ? instance.getElementById(selectedId) : undefined
     if (!selected || selected.empty()) return
+    const stepKey = [...stepUnits].join('|')
+    if (stepUnits.size > 1 && stepUnits.has(selected.id()) && stepKey !== focusedStep.current) {
+      focusedStep.current = stepKey
+      focusedCluster.current = undefined
+      instance.animate({ fit: { eles: instance.nodes('.step-unit'), padding: 40 } }, { duration: 250 })
+      return
+    }
+    if (stepUnits.size > 1 && stepUnits.has(selected.id())) return
+    focusedStep.current = undefined
     const cluster = selected.isParent() ? selected : selected.parent()
     if (cluster.nonempty() && cluster.first().id() !== focusedCluster.current) {
       focusedCluster.current = cluster.first().id()
@@ -319,7 +336,7 @@ export function GraphView({ model, selectedId, reviewed, hotspots, explanations,
     if (box.x1 < 0 || box.y1 < 0 || box.x2 > instance.width() || box.y2 > instance.height()) {
       instance.animate({ center: { eles: selected } }, { duration: 200 })
     }
-  }, [selectedId, reviewed, hotspots, commentCounts, explanations, nodesById, model.key])
+  }, [selectedId, reviewed, hotspots, commentCounts, explanations, nodesById, model.key, stepUnits])
 
   const contextIds = useMemo(() => model.nodes.filter((n) => n.role === 'context').map((n) => n.id), [model.nodes])
   const hovered = hover?.kind === 'node' ? nodesById.get(hover.id) : undefined

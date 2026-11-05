@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { type BpGraphDiff, diffBlueprint } from '../shared/bpdiff'
 import { excludeMatcher } from '../shared/glob'
-import type { Blueprint, CommitRange, FileChange, ReviewComment, ReviewModel } from '../shared/types'
+import { type Blueprint, type CommitRange, type FileChange, LOAD_CANCELLED, type ReviewComment, type ReviewModel } from '../shared/types'
 import { buildGraph } from './graph'
 import type { ReviewSource, ReviewTarget } from './source'
 import { isUnrealPackage, readBlueprint } from './uasset'
@@ -19,6 +19,8 @@ export class ReviewService {
   private readonly blueprints = new Map<number, Blueprint | null>()
   /** The user name on the server, read once. It marks the comments that the user may edit or delete. */
   private me?: Promise<string>
+  /** One controller per running load. cancelLoads aborts them all. */
+  private readonly loads = new Set<AbortController>()
 
   constructor(
     readonly source: ReviewSource,
@@ -37,53 +39,71 @@ export class ReviewService {
   /** The id goes into cm queries as text, so it must be a plain positive integer. */
   loadReview(reviewId: number, range?: CommitRange): Promise<ReviewModel> {
     if (!Number.isSafeInteger(reviewId) || reviewId <= 0) return Promise.reject(new Error(`Not a review id: ${reviewId}`))
-    return this.clearProgressOnError(this.readReview(reviewId, range))
+    return this.track((signal) => this.readReview(reviewId, signal, range))
   }
 
   /** git and cm read a name that starts with '-' as an option. The name can come from an MCP client, so the check stops option injection. */
   loadBranch(branch: string, range?: CommitRange): Promise<ReviewModel> {
     const name = branch.trim()
     if (!name || name.startsWith('-') || /[\x00-\x1f]/.test(name)) return Promise.reject(new Error(`Not a branch name: ${branch}`))
-    return this.clearProgressOnError(this.readBranch(name, range))
+    return this.track((signal) => this.readBranch(name, signal, range))
   }
 
   loadLocal(range?: CommitRange): Promise<ReviewModel> {
-    return this.clearProgressOnError(this.readLocal(range))
+    return this.track((signal) => this.readLocal(signal, range))
   }
 
-  /** A failed load must clear the progress label. MCP calls do not go through the renderer, which also clears it. */
-  private async clearProgressOnError(load: Promise<ReviewModel>): Promise<ReviewModel> {
+  /** True while a load runs. The status bar then shows the Cancel button. */
+  get loading(): boolean {
+    return this.loads.size > 0
+  }
+
+  /** Stops all running loads at the next step. Files that are already downloaded stay in the cache for the next load. */
+  cancelLoads(): void {
+    for (const load of this.loads) load.abort()
+  }
+
+  /**
+   * Runs a load that cancelLoads can stop. A failed load must clear the progress label, because MCP
+   * calls do not go through the renderer, which also clears it.
+   */
+  private async track(load: (signal: AbortSignal) => Promise<ReviewModel>): Promise<ReviewModel> {
+    const controller = new AbortController()
+    this.loads.add(controller)
     try {
-      return await load
+      return await load(controller.signal)
     } catch (e) {
       this.progress('')
-      throw e
+      throw controller.signal.aborted ? new Error(LOAD_CANCELLED) : e
+    } finally {
+      this.loads.delete(controller)
     }
   }
 
-  private async readReview(reviewId: number, range?: CommitRange): Promise<ReviewModel> {
+  private async readReview(reviewId: number, signal: AbortSignal, range?: CommitRange): Promise<ReviewModel> {
     this.progress(`Reading review ${reviewId}`)
     const target = await this.source.readReview(reviewId, range)
-    return this.build(this.source.reviewKey(reviewId), target, range)
+    return this.build(this.source.reviewKey(reviewId), target, signal, range)
   }
 
-  private async readBranch(branch: string, range?: CommitRange): Promise<ReviewModel> {
+  private async readBranch(branch: string, signal: AbortSignal, range?: CommitRange): Promise<ReviewModel> {
     this.progress(`Listing changes of ${branch.trim()}`)
     const target = await this.source.readBranch(branch, range)
-    return this.build(`branch:${target.branch}`, target, range)
+    return this.build(`branch:${target.branch}`, target, signal, range)
   }
 
-  private async readLocal(range?: CommitRange): Promise<ReviewModel> {
+  private async readLocal(signal: AbortSignal, range?: CommitRange): Promise<ReviewModel> {
     this.progress('Listing the local changes')
     const target = await this.source.readLocal(range)
-    return this.build(`local:${target.branch}`, target, range, true)
+    return this.build(`local:${target.branch}`, target, signal, range, true)
   }
 
   /**
    * A range model gets its own key, so its reviewed marks, summaries and AI check stay apart from the
    * model of the whole review. A unit that changed again then shows as not reviewed.
    */
-  private async build(reviewKey: string, { review, branch, commits, files: allFiles }: ReviewTarget, range?: CommitRange, local = false): Promise<ReviewModel> {
+  private async build(reviewKey: string, { review, branch, commits, files: allFiles }: ReviewTarget, signal: AbortSignal, range?: CommitRange, local = false): Promise<ReviewModel> {
+    signal.throwIfAborted()
     const key = range ? `${reviewKey}@${range.first}..${range.last}` : reviewKey
     const warnings: string[] = []
     const excluded = excludeMatcher(this.excludePatterns())
@@ -94,7 +114,8 @@ export class ReviewService {
     const textFiles = files.filter((f) => f.itemType === 'F' || (f.itemType === 'B' && isBlueprintPath(f.path)))
     const revIds = textFiles.flatMap((f) => [f.baseRevId, f.headRevId])
     this.progress('Downloading file revisions')
-    await this.source.fetchRevisions(revIds, this.revisionDir, (done, total) => this.progress('Downloading file revisions', done, total))
+    await this.source.fetchRevisions(revIds, this.revisionDir, (done, total) => this.progress('Downloading file revisions', done, total), signal)
+    signal.throwIfAborted()
     const contents = new Map<number, string>()
     const blueprints = new Map<string, BpGraphDiff[]>()
     for (const file of textFiles) {
@@ -109,6 +130,7 @@ export class ReviewService {
     }
     this.progress('Parsing the code and building the graph')
     const graph = await buildGraph(files, contents, blueprints)
+    signal.throwIfAborted()
     const comments = review ? await this.loadComments(review.id, files) : []
     const reviewers = review ? await this.source.reviewers(review.id) : []
     const model: ReviewModel = { key, source: this.source.kind, review, branch, commits, range, local, files, ...graph, comments, reviewers, warnings }
