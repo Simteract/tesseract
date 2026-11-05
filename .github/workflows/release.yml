@@ -1,0 +1,83 @@
+# Makes a release when the version in package.json changes on main.
+# The workflow builds the installer, pushes the tag v<version>, and publishes a GitHub release.
+# When the tag of the version exists already, the workflow does nothing.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The release notes need the full history and the tags to find the previous release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read the version and look for its tag
+        id: version
+        run: |
+          tag="v$(node -p "require('./package.json').version")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "The tag $tag exists already, so there is nothing to release."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.version.outputs.new == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - if: steps.version.outputs.new == 'true'
+        run: npm ci
+      - if: steps.version.outputs.new == 'true'
+        run: npm run typecheck
+      - if: steps.version.outputs.new == 'true'
+        run: npm run build
+      - name: Build the installer
+        if: steps.version.outputs.new == 'true'
+        run: npx electron-builder --win nsis --publish never
+      # The notes list every commit since the previous version tag, with the commit text but without trailers.
+      - name: Write the release notes
+        if: steps.version.outputs.new == 'true'
+        run: |
+          previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
+          range="${previous:+$previous..}HEAD"
+          {
+            echo "## Changes${previous:+ since $previous}"
+            echo
+            git log --reverse --no-merges --format='### %s%n%n%b' "$range" | grep -v -i -E '^(Co-Authored-By|Signed-off-by):'
+            if [ -n "$previous" ]; then
+              echo "**Full diff:** https://github.com/$GITHUB_REPOSITORY/compare/$previous...${{ steps.version.outputs.tag }}"
+            fi
+          } > release-notes.md
+          cat release-notes.md
+      # One gh call makes the tag, the release and all its assets. electron-builder uploads in parallel,
+      # and the parallel uploads made a second release that only had the blockmap. GitHub then reported
+      # that release as the latest, so the auto updater did not find latest.yml.
+      - name: Publish the release
+        if: steps.version.outputs.new == 'true'
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          version="${tag#v}"
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$version" --latest --notes-file release-notes.md \
+            "dist/Tesseract-$version-setup.exe" \
+            "dist/Tesseract-$version-setup.exe.blockmap" \
+            dist/latest.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

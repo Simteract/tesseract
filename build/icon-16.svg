@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#25304a"/>
+      <stop offset="1" stop-color="#121826"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+  <path d="M92.7 106.5L111.4 97.6L163.3 97.6L163.3 149.5L144.6 158.4L92.7 158.4Z" fill="#E69F00" stroke="#E69F00" stroke-width="26" stroke-linejoin="round" opacity="0.45"/>
+  <path d="M44.0 76.7L88.5 55.7L212.0 55.7L167.5 76.7Z" fill="#009E73" stroke="#009E73" stroke-width="26" stroke-linejoin="round" opacity="0.45"/>
+  <path d="M92.7 106.5L44.0 76.7M144.6 106.5L167.5 76.7M92.7 158.4L44.0 200.3M144.6 158.4L167.5 200.3M111.4 97.6L88.5 55.7M163.3 97.6L212.0 55.7M111.4 149.5L88.5 179.3M163.3 149.5L212.0 179.3" fill="none" stroke="#56B4E9" stroke-width="7" stroke-linecap="round"/>
+  <path d="M92.7 106.5L144.6 106.5M92.7 106.5L92.7 158.4M92.7 106.5L111.4 97.6M144.6 106.5L144.6 158.4M144.6 106.5L163.3 97.6M92.7 158.4L144.6 158.4M92.7 158.4L111.4 149.5M144.6 158.4L163.3 149.5M111.4 97.6L163.3 97.6M111.4 97.6L111.4 149.5M163.3 97.6L163.3 149.5M111.4 149.5L163.3 149.5" fill="none" stroke="#E8F1FA" stroke-width="9" stroke-linecap="round"/>
+  <path d="M44.0 76.7L167.5 76.7M44.0 76.7L44.0 200.3M44.0 76.7L88.5 55.7M167.5 76.7L167.5 200.3M167.5 76.7L212.0 55.7M44.0 200.3L167.5 200.3M44.0 200.3L88.5 179.3M167.5 200.3L212.0 179.3M88.5 55.7L212.0 55.7M88.5 55.7L88.5 179.3M212.0 55.7L212.0 179.3M88.5 179.3L212.0 179.3" fill="none" stroke="#56B4E9" stroke-width="10" stroke-linecap="round" stroke-dasharray="30 18"/>
+  
+</svg>
