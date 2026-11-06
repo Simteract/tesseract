@@ -26,8 +26,8 @@ discuss them.
 
 ![Reviews panel](docs/media/1-reviews.webp)
 
-- The activity bar on the left switches between three panels: **Reviews**, **AI check** and
-  **Threads**. Click the active button again to hide the panel and get more room.
+- The activity bar on the left switches between the panels: **Reviews**, **AI check**, **Walk**,
+  **Threads** and **Settings**. Click the active button again to hide the panel and get more room.
 - The Reviews panel lists the reviews assigned to you, the reviews you created, and recent
   reviews. Type in the filter box to search by id, title or owner.
 - Paste a Plastic review link into the box at the top of the panel, for example a link from a
@@ -156,6 +156,8 @@ changed behavior that other code depends on.
 - The result is saved. A new revision of a file makes it stale.
 
 ### 8. Walkthrough of a change
+
+![Walkthrough](docs/media/8-walkthrough.webp)
 
 Open the Walk panel (`w`), pick a level, and click "Walk me through". Claude teaches you the change
 in short steps, so you understand it before you judge it. This helps most when you do not know the
