@@ -2,7 +2,25 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describeBlueprintDiff } from '../shared/bpdiff'
-import type { Cluster, Explanation, GraphNode, Hotspot, HotspotLevel, PreReview, ReviewModel, SourceKind, Walkthrough, WalkthroughLevel, WalkthroughStep, WalkthroughStepKind } from '../shared/types'
+import {
+  AI_EFFORTS,
+  AI_MODELS,
+  AI_TASK_DEFAULTS,
+  type AiTask,
+  type AiTaskSettings,
+  type Cluster,
+  type Explanation,
+  type GraphNode,
+  type Hotspot,
+  type HotspotLevel,
+  type PreReview,
+  type ReviewModel,
+  type SourceKind,
+  type Walkthrough,
+  type WalkthroughLevel,
+  type WalkthroughStep,
+  type WalkthroughStepKind
+} from '../shared/types'
 import { clusterDiff, clusterRelations, nodeDiff, renderThread, threadsOf } from './context'
 import { blueprintUnitId } from './graph'
 import { codeLanguage } from './languages'
@@ -109,7 +127,7 @@ export function launchClaude(runDir: string, workspace: string, prompt: string):
     [
       '@echo off',
       `cd /d "${workspace.replace(/%/g, '%%')}"`,
-      `claude "Read the code review feedback in the file ${promptFile} and apply it in this workspace. Follow the rules in that file."`,
+      `claude ${taskArgs('fix').join(' ')} "Read the code review feedback in the file ${promptFile} and apply it in this workspace. Follow the rules in that file."`,
       ''
     ].join('\r\n'),
     'utf8'
@@ -141,7 +159,7 @@ export async function summarizeCluster(service: ReviewService, model: ReviewMode
     '## Diff',
     ...clusterDiff(service, model, cluster, SUMMARY_DIFF_LINES)
   ].join('\n')
-  return runClaudePrint(prompt, workspace)
+  return runClaudePrint('summary', prompt, workspace)
 }
 
 /**
@@ -173,7 +191,7 @@ export async function preReview(service: ReviewService, model: ReviewModel, work
   ]
     .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
     .join('\n')
-  const answer = await runClaudePrint(prompt, workspace, PRE_REVIEW_TIMEOUT_MS, PRE_REVIEW_TURNS)
+  const answer = await runClaudePrint('prereview', prompt, workspace, PRE_REVIEW_TIMEOUT_MS, PRE_REVIEW_TURNS)
   return parsePreReview(answer, handles)
 }
 
@@ -303,7 +321,7 @@ export async function walkthrough(service: ReviewService, model: ReviewModel, wo
   ]
     .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
     .join('\n')
-  const answer = await runClaudePrint(prompt, workspace, WALKTHROUGH_TIMEOUT_MS, WALKTHROUGH_TURNS)
+  const answer = await runClaudePrint('walkthrough', prompt, workspace, WALKTHROUGH_TIMEOUT_MS, WALKTHROUGH_TURNS)
   return parseWalkthrough(answer, level, new Map([...changed, ...contextHandles]), units)
 }
 
@@ -365,7 +383,7 @@ export async function askWalkthrough(service: ReviewService, model: ReviewModel,
   ]
     .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
     .join('\n')
-  return runClaudePrint(prompt, workspace, ASK_TIMEOUT_MS, ASK_TURNS)
+  return runClaudePrint('ask', prompt, workspace, ASK_TIMEOUT_MS, ASK_TURNS)
 }
 
 function parseJson<T>(answer: string): T {
@@ -461,7 +479,7 @@ export async function explainContext(service: ReviewService, model: ReviewModel,
   ]
     .filter((line, i, all) => !(line === '' && all[i - 1] === ''))
     .join('\n')
-  const answer = await runClaudePrint(prompt, workspace, EXPLAIN_TIMEOUT_MS, EXPLAIN_TURNS)
+  const answer = await runClaudePrint('explain', prompt, workspace, EXPLAIN_TIMEOUT_MS, EXPLAIN_TURNS)
   const json = answer.slice(answer.indexOf('{'), answer.lastIndexOf('}') + 1)
   let parsed: Record<string, unknown>
   try {
@@ -500,9 +518,45 @@ function parsePreReview(answer: string, handles: Map<string, GraphNode>): PreRev
   return { createdAt: new Date().toISOString(), overview: named(parsed.overview), hotspots }
 }
 
-function runClaudePrint(prompt: string, cwd: string, timeoutMs = SUMMARY_TIMEOUT_MS, maxTurns = 10): Promise<string> {
+let taskSettings: (task: AiTask) => AiTaskSettings | undefined = () => undefined
+
+/** The main process gives the reader of the settings once. Each Claude run then reads the current settings of its task. */
+export function configureClaude(read: (task: AiTask) => AiTaskSettings | undefined): void {
+  taskSettings = read
+}
+
+/**
+ * The claude flags for the model and effort of a task. A missing setting uses AI_TASK_DEFAULTS. The claude command runs
+ * through a shell, so only values from AI_MODELS and AI_EFFORTS pass. A bad value in settings.json then cannot inject a command.
+ */
+function taskArgs(task: AiTask, withModel = true): string[] {
+  const chosen = { ...AI_TASK_DEFAULTS[task], ...taskSettings(task) }
+  const model = withModel ? AI_MODELS.find((m) => m === chosen.model) : undefined
+  const effort = AI_EFFORTS.find((e) => e === chosen.effort)
+  return [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
+}
+
+/** Claude Code prints this text when it does not know a model alias or the account has no access to the model. */
+const UNKNOWN_MODEL = /unrecognized_model|issue with the selected model/i
+
+/**
+ * Runs one Claude prompt with the model of the task. A model alias can go away in a later Claude Code. The run then
+ * repeats without the model flag, so the task falls back to the Claude Code default and does not break.
+ */
+async function runClaudePrint(task: AiTask, prompt: string, cwd: string, timeoutMs = SUMMARY_TIMEOUT_MS, maxTurns = 10): Promise<string> {
+  const args = taskArgs(task)
+  try {
+    return await runClaudeOnce(args, prompt, cwd, timeoutMs, maxTurns)
+  } catch (error) {
+    if (!args.includes('--model') || !UNKNOWN_MODEL.test(String(error))) throw error
+    console.warn(`Claude model of task "${task}" is not available. The run uses the Claude Code default.`)
+    return runClaudeOnce(taskArgs(task, false), prompt, cwd, timeoutMs, maxTurns)
+  }
+}
+
+function runClaudeOnce(taskFlags: string[], prompt: string, cwd: string, timeoutMs: number, maxTurns: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn('claude', ['-p', '--allowedTools', 'Read,Grep,Glob', '--max-turns', String(maxTurns)], { cwd, shell: true, windowsHide: true })
+    const child = spawn('claude', ['-p', '--allowedTools', 'Read,Grep,Glob', '--max-turns', String(maxTurns), ...taskFlags], { cwd, shell: true, windowsHide: true })
     const out: Buffer[] = []
     const err: Buffer[] = []
     const timer = setTimeout(() => {

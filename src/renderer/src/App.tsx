@@ -24,7 +24,7 @@ import { Navigator } from './Navigator'
 import { hotspotDraft, NodeContext } from './NodeContext'
 import { formatSeconds, PreReviewPanel } from './PreReviewPanel'
 import { ReviewStatus } from './ReviewStatus'
-import { SettingsMenu } from './SettingsMenu'
+import { SettingsPanel } from './SettingsPanel'
 import { Splitter } from './Splitter'
 import { StatusBar } from './StatusBar'
 import { WalkthroughPanel } from './WalkthroughPanel'
@@ -451,22 +451,6 @@ export function App(): React.JSX.Element {
           Graph
         </button>
         <WorkspacePicker settings={settings} run={run} onSettings={applySettings} />
-        <SettingsMenu
-          settings={settings}
-          run={run}
-          onSettings={applySettings}
-          onCleared={(kinds) => {
-            const cleared = new Set(kinds)
-            if (cleared.has('explanations')) setExplanations(undefined)
-            if (cleared.has('prereviews')) setPreReview(undefined)
-            if (cleared.has('walkthroughs')) setWalkthroughs({})
-            if (cleared.has('marks')) {
-              setReviewed(new Set())
-              setStepsDone(new Set())
-            }
-            if (cleared.has('revisions') && model) openRange(model, model.range, selectedId)
-          }}
-        />
         {model && (
           <span className="title" title={model.branch}>
             {model.review ? `#${model.review.id} ${model.review.title}` : model.local ? `Local changes on ${model.branch}` : model.branch}
@@ -509,6 +493,8 @@ export function App(): React.JSX.Element {
           'Comment threads, AI drafts and the Claude buttons (d). Click again to hide the panel.',
           modelDrafts.length > 0 ? <span className="activity-badge draft">{modelDrafts.length} AI</span> : threadCount > 0 ? <span className="activity-badge">{threadCount}</span> : undefined
         )}
+        <div className="activity-bottom" />
+        {activity('settings', '⚙', 'Settings', 'App settings: Claude models, hidden files and saved data. Click again to hide the panel.')}
       </nav>
       <aside className={`left-panel ${layout.leftPanel ? '' : 'hidden'}`}>
         <div className="left-panel-body" hidden={layout.leftPanel !== 'reviews'}>
@@ -575,6 +561,24 @@ export function App(): React.JSX.Element {
           ) : (
             <div className="empty">Open a review first.</div>
           )}
+        </div>
+        <div className="left-panel-body" hidden={layout.leftPanel !== 'settings'}>
+          <SettingsPanel
+            settings={settings}
+            run={run}
+            onSettings={applySettings}
+            onCleared={(kinds) => {
+              const cleared = new Set(kinds)
+              if (cleared.has('explanations')) setExplanations(undefined)
+              if (cleared.has('prereviews')) setPreReview(undefined)
+              if (cleared.has('walkthroughs')) setWalkthroughs({})
+              if (cleared.has('marks')) {
+                setReviewed(new Set())
+                setStepsDone(new Set())
+              }
+              if (cleared.has('revisions') && model) openRange(model, model.range, selectedId)
+            }}
+          />
         </div>
         <Splitter
           className="splitter-right"

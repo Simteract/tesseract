@@ -60,7 +60,7 @@ export function clearMarks(): void {
   }
 }
 
-export type LeftPanel = 'reviews' | 'prereview' | 'walkthrough' | 'discussion'
+export type LeftPanel = 'reviews' | 'prereview' | 'walkthrough' | 'discussion' | 'settings'
 
 export interface Layout {
   /** Width of the left panel. The name stays for the stored layouts from before the activity bar. */

@@ -1,6 +1,6 @@
 {
   "name": "tesseract",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Graph-based code review for Plastic SCM / Unity Version Control and GitHub",
   "private": true,
   "main": "./out/main/index.js",

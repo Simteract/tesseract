@@ -153,6 +153,40 @@ export interface Settings {
   mcpPort?: number
   /** Glob patterns of files that a review hides, for example "*.dll". See shared/glob.ts for the rules. */
   excludePatterns?: string[]
+  /** The Claude model and effort of each kind of AI task. A missing value uses AI_TASK_DEFAULTS. */
+  ai?: Partial<Record<AiTask, AiTaskSettings>>
+}
+
+/** The kinds of AI task. Each kind can use its own model and effort. */
+export type AiTask = 'summary' | 'explain' | 'prereview' | 'walkthrough' | 'ask' | 'fix'
+
+/** Model aliases of Claude Code. The app passes only these values, because the claude command runs through a shell. */
+export const AI_MODELS = ['fable', 'opus', 'sonnet', 'haiku'] as const
+export type AiModel = (typeof AI_MODELS)[number]
+
+/** Effort levels of Claude Code. The same shell rule applies as for AI_MODELS. */
+export const AI_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export type AiEffort = (typeof AI_EFFORTS)[number]
+
+/** The value that lets Claude Code choose. The app then passes no flag. */
+export const CLAUDE_DEFAULT = 'default'
+
+export interface AiTaskSettings {
+  model?: AiModel | typeof CLAUDE_DEFAULT
+  effort?: AiEffort | typeof CLAUDE_DEFAULT
+}
+
+/**
+ * The app choice for each task when the user did not choose. Cheap tasks use small models, and the tasks that read the whole change
+ * use the strongest model. "Send to Claude Code" opens the user's own session, so it keeps the Claude Code default.
+ */
+export const AI_TASK_DEFAULTS: Record<AiTask, Required<AiTaskSettings>> = {
+  summary: { model: 'haiku', effort: 'low' },
+  explain: { model: 'sonnet', effort: 'medium' },
+  prereview: { model: 'opus', effort: 'high' },
+  walkthrough: { model: 'opus', effort: 'high' },
+  ask: { model: 'sonnet', effort: 'medium' },
+  fix: { model: CLAUDE_DEFAULT, effort: CLAUDE_DEFAULT }
 }
 
 export type ReviewFilter = 'assigned' | 'mine' | 'recent'

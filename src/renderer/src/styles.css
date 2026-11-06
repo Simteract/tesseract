@@ -1125,15 +1125,60 @@ body.resizing-y * {
 .commits-popup li.current .commit-pick {
   color: var(--text);
 }
-.settings-popup textarea {
-  font-family: Consolas, 'Cascadia Mono', monospace;
-  font-size: 12px;
-  resize: vertical;
-}
 .settings-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.settings-panel textarea {
+  font-family: Consolas, 'Cascadia Mono', monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.settings-panel .panel-body {
+  display: flex;
+  flex-direction: column;
+}
+.settings-search {
+  width: 100%;
+}
+.settings-pages button {
+  flex: 1;
+}
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.settings-section[hidden] {
+  display: none;
+}
+.settings-section h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.ai-models {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ai-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ai-model-pickers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.ai-model-pickers select {
+  min-width: 0;
+}
+.activity-bottom {
+  margin-top: auto;
 }
 .saved-data {
   display: grid;

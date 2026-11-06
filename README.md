@@ -50,10 +50,15 @@ discuss them.
   changes. After the author pushes fixes, a "N new since your last visit" button opens only the
   new changesets. A range has its own reviewed marks, so units that changed again show as not
   reviewed.
-- The ⚙ button in the top bar hides files from reviews by glob pattern, for example `*.dll` or
-  `Binaries/`. The app does not download hidden files, so big changes open faster. "Add common
-  binaries" fills in the usual build outputs. The patterns are saved and apply to the next review
-  that you open.
+- The ⚙ Settings panel at the bottom of the left bar has three pages and a search box:
+  - "Claude" sets the model and the effort of each kind of Claude task. The app starts with its
+    own choice for each task, for example Haiku for cluster summaries and Opus for the AI
+    pre-review. "Claude Code default" lets Claude Code choose. If a model is not available, the
+    task uses the Claude Code default.
+  - "Files" hides files from reviews by glob pattern, for example `*.dll` or `Binaries/`. The app
+    does not download hidden files, so big changes open faster. "Add common binaries" fills in the
+    usual build outputs. The patterns apply to the next review that you open.
+  - "Saved data" shows and clears the data that the app keeps (see section 4).
 
 ### 2. Graph of changed code, with its context
 
@@ -98,7 +103,7 @@ Context code is often new to the reviewer.
   "Called by" link.
 - The explanations are saved. A new revision of the file makes them stale.
 - "Clear" next to an explanation deletes it, and "Clear explanations" in the cluster box deletes
-  those of the cluster. "Saved data" in the ⚙ popup shows the size of each kind of saved data.
+  those of the cluster. "Saved data" in the ⚙ Settings panel shows the size of each kind of saved data.
   Check the kinds to delete, for example explanations, summaries, pre-reviews, walkthroughs or
   downloaded files, and click "Clear checked". This deletes them for all reviews.
 

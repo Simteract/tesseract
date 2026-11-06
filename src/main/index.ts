@@ -24,7 +24,7 @@ import type {
   WalkthroughLevel,
   WalkthroughStatus
 } from '../shared/types'
-import { askWalkthrough, buildFixPrompt, EXPLAIN_BATCH, explainContext, launchClaude, preReview, summarizeCluster, walkthrough } from './claude'
+import { askWalkthrough, buildFixPrompt, configureClaude, EXPLAIN_BATCH, explainContext, launchClaude, preReview, summarizeCluster, walkthrough } from './claude'
 import { initParsers } from './languages'
 import { startMcpServer } from './mcp'
 import { ReviewService } from './review'
@@ -489,6 +489,7 @@ app.whenReady().then(async () => {
     cpp: join(modules, 'tree-sitter-cpp', 'tree-sitter-cpp.wasm'),
     rust: join(modules, 'tree-sitter-rust', 'tree-sitter-rust.wasm')
   })
+  configureClaude((task) => settings.ai?.[task])
   registerIpc()
   await startMcp()
   createWindow()
