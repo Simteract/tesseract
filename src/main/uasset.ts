@@ -1,4 +1,4 @@
-import type { Blueprint, BpGraph, BpNode, BpPin } from '../shared/types'
+import type { AssetGroup, AssetKind, AssetProperties, Blueprint, BpGraph, BpNode, BpPin } from '../shared/types'
 
 /** The first four bytes of each Unreal package file. */
 const PACKAGE_FILE_TAG = 0x9e2a83c1
@@ -9,6 +9,7 @@ const MIN_UE4_VERSION = 518
 /** UE5 file versions that change the layout of the header or of the property tags. */
 const UE5 = {
   OPTIONAL_RESOURCES: 1003,
+  LARGE_WORLD_COORDINATES: 1004,
   REMOVE_OBJECT_EXPORT_PACKAGE_GUID: 1005,
   TRACK_OBJECT_EXPORT_IS_INHERITED: 1006,
   FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES: 1007,
@@ -43,7 +44,8 @@ const PIN_CONTAINER_MAP = 3
 const NATIVE_STRUCTS = new Set([
   'Guid', 'Vector', 'Vector2D', 'Vector4', 'Rotator', 'Quat', 'LinearColor', 'Color', 'IntPoint', 'IntVector',
   'Box', 'Box2D', 'Plane', 'DateTime', 'Timespan', 'SoftObjectPath', 'SoftClassPath', 'GameplayTagContainer',
-  'GameplayTag', 'FrameNumber', 'PerPlatformFloat', 'PerPlatformInt', 'PerPlatformBool', 'Matrix', 'Vector3f', 'Vector3d'
+  'GameplayTag', 'FrameNumber', 'PerPlatformFloat', 'PerPlatformInt', 'PerPlatformBool', 'Matrix', 'Vector3f', 'Vector3d',
+  'StaticMaterial', 'SkeletalMaterial'
 ])
 
 interface Export {
@@ -113,6 +115,30 @@ export function readBlueprint(bytes: Buffer): Blueprint | undefined {
   return new PackageReader(bytes).blueprint()
 }
 
+/**
+ * Reads the properties of an asset: a Data Asset, a DataTable with its rows, or the class defaults
+ * of a Blueprint. Returns undefined for a cooked package or a package without a main object.
+ * Throws on a package format that the reader does not know.
+ */
+export function readAssetProperties(bytes: Buffer): AssetProperties | undefined {
+  return new PackageReader(bytes).assetProperties()
+}
+
+/** Top-level exports that hold package data, not the asset. */
+const PACKAGE_HELPERS = new Set(['MetaData', 'PackageMetaData'])
+
+/** Asset properties that the editor changes on import or save, not the user. */
+const ASSET_NOISE = new Set(['AssetImportData', 'ThumbnailInfo', 'AssetUserData', 'UberGraphFrame'])
+
+/** Classes of sub-objects that hold import and thumbnail data, not the asset. */
+const NOISE_OBJECTS = /ImportData$|ThumbnailInfo/
+
+/** The suffix that a user-defined struct adds to each field name, for example "_12_8F3A...". */
+const STRUCT_FIELD_SUFFIX = /_\d+_[0-9A-F]{32}(?=\[|$)/
+
+/** The text value of each element of a set. A set has keys but no values. */
+const IN_SET = 'in set'
+
 class PackageReader {
   private readonly r: Reader
   private ue4 = 0
@@ -120,6 +146,8 @@ class PackageReader {
   private flags = 0
   private readonly custom = new Map<string, number>()
   private names: string[] = []
+  /** The soft object paths of the package. When the list exists, each soft path in an object is an index into it. */
+  private softPaths: string[] = []
   private imports: { className: string; name: string; outer: number }[] = []
   private exports: Export[] = []
 
@@ -152,7 +180,12 @@ class PackageReader {
     this.flags = r.u32()
     const nameCount = r.i32()
     const nameOffset = r.i32()
-    if (this.ue5 >= UE5.ADD_SOFTOBJECTPATH_LIST) r.skip(8)
+    let softPathCount = 0
+    let softPathOffset = 0
+    if (this.ue5 >= UE5.ADD_SOFTOBJECTPATH_LIST) {
+      softPathCount = r.i32()
+      softPathOffset = r.i32()
+    }
     if (!this.cooked()) r.fstring()
     r.skip(8)
     const exportCount = r.i32()
@@ -199,6 +232,8 @@ class PackageReader {
       this.exports.push({ className: '', name, outer, serialOffset, serialSize, scriptStart, scriptEnd, classIndex } as Export & { classIndex: number })
     }
     for (const e of this.exports as (Export & { classIndex: number })[]) e.className = this.objectName(e.classIndex)
+    r.pos = softPathOffset
+    for (let i = 0; i < softPathCount; i++) this.softPaths.push(this.fullSoftPath())
   }
 
   private cooked(): boolean {
@@ -247,6 +282,49 @@ class PackageReader {
     }
   }
 
+  /**
+   * The main object is the top-level export of the asset. A Blueprint uses its class default object
+   * instead, because the Blueprint object itself holds only editor data.
+   */
+  assetProperties(): AssetProperties | undefined {
+    if (this.cooked()) return undefined
+    const top = this.exports
+      .map((e, i) => ({ e, index: i + 1 }))
+      .filter(({ e }) => e.outer === 0 && !PACKAGE_HELPERS.has(e.className) && !e.className.endsWith('GeneratedClass'))
+    const blueprint = top.find(({ e }) => /Blueprint$/.test(e.className))
+    const main = blueprint ? top.find(({ e }) => e.name === `Default__${blueprint.e.name}_C`) : top.find(({ e }) => !e.name.startsWith('Default__'))
+    if (!main) return undefined
+    const kind: AssetKind = blueprint ? 'defaults' : main.e.className === 'DataTable' ? 'table' : 'data'
+    const mainProps = flattenAsset(this.properties(main.e))
+    const rows = kind === 'table' ? this.tableRows(main.e) : []
+    const groups: AssetGroup[] = [{ name: main.e.name, kind: 'object', props: mainProps }, ...rows]
+    this.exports.forEach((e, i) => {
+      if (e.outer !== main.index || i + 1 === main.index || NOISE_OBJECTS.test(e.className)) return
+      try {
+        const props = flattenAsset(this.properties(e))
+        if (Object.keys(props).length > 0) groups.push({ name: e.name, kind: 'object', props })
+      } catch (error) {
+        console.warn(`Cannot read the sub-object ${e.name}:`, error)
+      }
+    })
+    return { className: blueprint?.e.className ?? main.e.className, kind, groups }
+  }
+
+  /** Reads the rows of a DataTable. UDataTable::Serialize writes them after the object properties. */
+  private tableRows(e: Export): AssetGroup[] {
+    const r = this.r
+    const end = e.serialOffset + e.serialSize
+    this.skipObjectGuid()
+    const count = r.i32()
+    if (count < 0 || count > 1_000_000) throw new Error(`bad row count ${count}`)
+    const rows: AssetGroup[] = []
+    for (let i = 0; i < count && r.pos < end; i++) {
+      const name = this.fname()
+      rows.push({ name, kind: 'row', props: flattenAsset(this.taggedProperties(end)) })
+    }
+    return rows
+  }
+
   private node(e: Export, index: number): BpNode {
     const node: BpNode = { id: e.name, className: e.className, title: e.className, x: 0, y: 0, props: {}, pins: [] }
     try {
@@ -289,6 +367,7 @@ class PackageReader {
       if (name === 'None') break
       const tag = this.ue5 >= UE5.PROPERTY_TAG_COMPLETE_TYPE_NAME ? this.tag() : this.oldTag()
       const start = r.pos
+      if (tag.size < 0 || start + tag.size > limit) throw new Error(`property ${name} goes past its parent`)
       let value: Value
       try {
         value = tag.type.name === 'BoolProperty' ? tag.boolValue : this.value(tag.type, tag.size, tag.native)
@@ -376,6 +455,9 @@ class PackageReader {
       case 'WeakObjectProperty': return this.objectRef()
       case 'SoftObjectProperty':
       case 'SoftClassProperty': return this.softPath()
+      case 'BoolProperty': return r.u8() !== 0
+      case 'MapProperty': return this.map(type, size)
+      case 'SetProperty': return this.set(type, size)
       case 'StructProperty': return this.struct(type.params[0]?.name ?? '', size, native)
       case 'ArrayProperty': return this.array(type.params[0] ?? { name: '', params: [] }, size)
       default: return undefined
@@ -383,52 +465,137 @@ class PackageReader {
   }
 
   private struct(structName: string, size: number, native: boolean): Value {
+    return native ? this.nativeStruct(structName, size) : this.taggedProperties(this.r.pos + size)
+  }
+
+  /**
+   * Reads a struct that has its own binary form. The size is 0 inside a container. Then the file
+   * version tells if the floating point fields are doubles (large world coordinates).
+   */
+  private nativeStruct(structName: string, size: number): Value {
     const r = this.r
-    if (!native) return this.taggedProperties(r.pos + size)
+    const doubles = (count: number): boolean => (size > 0 ? size >= count * 8 : this.ue5 >= UE5.LARGE_WORLD_COORDINATES)
+    const reals = (count: number): string => {
+      const wide = doubles(count)
+      return `(${Array.from({ length: count }, () => round(wide ? r.f64() : r.f32())).join(', ')})`
+    }
+    const ints = (count: number, read: () => number): string => `(${Array.from({ length: count }, read).join(', ')})`
     switch (structName) {
       case 'Guid': return r.guid()
-      case 'Vector2D': return size === 16 ? [round(r.f64()), round(r.f64())] : [round(r.f32()), round(r.f32())]
-      case 'IntPoint': return [r.i32(), r.i32()]
-      case 'LinearColor': return [round(r.f32()), round(r.f32()), round(r.f32()), round(r.f32())]
-      case 'Color': return [r.u8(), r.u8(), r.u8(), r.u8()]
+      case 'Vector2D': return reals(2)
+      case 'Vector':
+      case 'Rotator': return reals(3)
+      case 'Vector4':
+      case 'Quat':
+      case 'Plane': return reals(4)
+      case 'Vector3f': return ints(3, () => round(r.f32()))
+      case 'Vector3d': return ints(3, () => round(r.f64()))
+      case 'IntPoint': return ints(2, () => r.i32())
+      case 'IntVector': return ints(3, () => r.i32())
+      case 'LinearColor': return ints(4, () => round(r.f32()))
+      case 'Color': return ints(4, () => r.u8())
+      case 'FrameNumber': return r.i32()
+      case 'DateTime':
+      case 'Timespan': return r.i64()
+      case 'SoftObjectPath':
+      case 'SoftClassPath': return this.softPath()
+      case 'GameplayTag': return this.fname()
+      case 'GameplayTagContainer': {
+        const count = r.i32()
+        if (count < 0 || count > 10000) throw new Error(`bad tag count ${count}`)
+        return Array.from({ length: count }, () => this.fname()).sort().join(', ')
+      }
       default: return undefined
     }
+  }
+
+  /** Reads one element of an array, a set or a map. The limit is the end of the whole container. */
+  private element(type: TypeName, limit: number): Value {
+    if (type.name !== 'StructProperty') return this.value(type, 0, false)
+    const structName = type.params[0]?.name ?? ''
+    if (!structName) throw new Error('struct element without a struct name')
+    return NATIVE_STRUCTS.has(structName) ? this.nativeStruct(structName, 0) : this.taggedProperties(limit)
   }
 
   private array(inner: TypeName, size: number): Value {
     const r = this.r
     const end = r.pos + size
     const count = r.i32()
-    if (inner.name === 'BoolProperty') return Array.from({ length: count }, () => r.u8() !== 0)
-    if (inner.name === 'StructProperty') {
-      let structName = inner.params[0]?.name ?? ''
-      if (this.ue5 < UE5.PROPERTY_TAG_COMPLETE_TYPE_NAME) {
-        this.fname()
-        this.fname()
-        r.skip(16)
-        structName = this.fname()
-        r.skip(16)
-        if (r.u8()) r.skip(16)
-        if (this.ue5 >= UE5.PROPERTY_TAG_EXTENSION) {
-          const extensions = r.u8()
-          if (extensions & 0x02) r.skip(1 + 4)
-        }
+    if (count < 0 || count > 1_000_000) throw new Error(`bad array count ${count}`)
+    let element = inner
+    if (inner.name === 'StructProperty' && this.ue5 < UE5.PROPERTY_TAG_COMPLETE_TYPE_NAME) {
+      this.fname()
+      this.fname()
+      r.skip(16)
+      const structName = this.fname()
+      r.skip(16)
+      if (r.u8()) r.skip(16)
+      if (this.ue5 >= UE5.PROPERTY_TAG_EXTENSION) {
+        const extensions = r.u8()
+        if (extensions & 0x02) r.skip(1 + 4)
       }
-      if (NATIVE_STRUCTS.has(structName)) return undefined
-      const items: Value[] = []
-      for (let i = 0; i < count && r.pos < end; i++) items.push(this.taggedProperties(end))
-      return items
+      element = { name: 'StructProperty', params: [{ name: structName, params: [] }] }
     }
     const items: Value[] = []
-    for (let i = 0; i < count; i++) {
-      const item = this.value(inner, 0, false)
+    for (let i = 0; i < count && r.pos < end; i++) {
+      const item = this.element(element, end)
       if (item === undefined) return undefined
       items.push(item)
     }
     return items
   }
 
+  /**
+   * Reads a map. A map saves the keys that it removed from its archetype first, then its entries.
+   * The keys become "{key}" parts of the property path.
+   */
+  private map(type: TypeName, size: number): Value {
+    const r = this.r
+    const end = r.pos + size
+    const [keyType, valueType] = type.params
+    if (!keyType || !valueType) return undefined
+    this.skipRemovedKeys(keyType, end)
+    const count = r.i32()
+    if (count < 0 || count > 1_000_000) throw new Error(`bad map count ${count}`)
+    const entries: Record<string, Value> = {}
+    for (let i = 0; i < count && r.pos < end; i++) {
+      const key = this.element(keyType, end)
+      const value = this.element(valueType, end)
+      if (key === undefined || value === undefined) return undefined
+      entries[`{${keyText(key)}}`] = value
+    }
+    return entries
+  }
+
+  private set(type: TypeName, size: number): Value {
+    const r = this.r
+    const end = r.pos + size
+    const itemType = type.params[0]
+    if (!itemType) return undefined
+    this.skipRemovedKeys(itemType, end)
+    const count = r.i32()
+    if (count < 0 || count > 1_000_000) throw new Error(`bad set count ${count}`)
+    const items: Record<string, Value> = {}
+    for (let i = 0; i < count && r.pos < end; i++) {
+      const item = this.element(itemType, end)
+      if (item === undefined) return undefined
+      items[`{${keyText(item)}}`] = IN_SET
+    }
+    return items
+  }
+
+  private skipRemovedKeys(keyType: TypeName, limit: number): void {
+    const removed = this.r.i32()
+    if (removed < 0 || removed > 1_000_000) throw new Error(`bad removed key count ${removed}`)
+    for (let i = 0; i < removed; i++) this.element(keyType, limit)
+  }
+
   private softPath(): string {
+    if (this.softPaths.length > 0) return this.softPaths[this.r.i32()] ?? ''
+    return this.fullSoftPath()
+  }
+
+  private fullSoftPath(): string {
     const r = this.r
     if (this.ue5 >= UE5.FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES) {
       const pkg = this.fname()
@@ -540,8 +707,9 @@ class PackageReader {
   }
 }
 
+/** Keeps 3 decimals, or 7 digits for a very large value such as FLT_MAX, which marks "no value" in curves. */
 function round(value: number): number {
-  return Math.round(value * 1000) / 1000
+  return Math.abs(value) >= 1e9 ? Number(value.toPrecision(7)) : Math.round(value * 1000) / 1000
 }
 
 function shortEnum(value: string): string {
@@ -593,4 +761,32 @@ function flattenProps(props: Record<string, Value>): Record<string, string> {
     out[key] = text
   }
   return out
+}
+
+function keyText(key: Value): string {
+  return typeof key === 'object' ? JSON.stringify(key) : String(key)
+}
+
+function cleanKey(key: string): string {
+  return key.replace(STRUCT_FIELD_SUFFIX, '')
+}
+
+/** Flattens the properties of an asset to readable paths, for example "Weapons[2].Damage" or "Costs{Gold}". */
+function flattenAsset(props: Record<string, Value>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(props)) if (!ASSET_NOISE.has(key)) flattenValue(cleanKey(key), value, out)
+  return out
+}
+
+function flattenValue(path: string, value: Value, out: Record<string, string>): void {
+  if (value === undefined || value === '') return
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => flattenValue(`${path}[${i}]`, item, out))
+    return
+  }
+  if (typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) flattenValue(key.startsWith('{') ? `${path}${key}` : `${path}.${cleanKey(key)}`, item, out)
+    return
+  }
+  out[path] = String(value)
 }

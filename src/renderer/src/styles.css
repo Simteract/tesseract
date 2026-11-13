@@ -1411,6 +1411,72 @@ button.small .spinner {
   display: flex;
   min-height: 0;
 }
+.asset-filter {
+  width: 180px;
+}
+.asset-body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+.asset-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.asset-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-2);
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.asset-group th {
+  text-align: left;
+  padding: 8px 8px 4px;
+  font-weight: 600;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.asset-whole {
+  font-weight: 400;
+  color: var(--muted);
+}
+.asset-row td {
+  padding: 2px 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+.asset-row.added td:first-child {
+  border-left: 4px solid #56b4e9;
+}
+.asset-row.removed td:first-child {
+  border-left: 4px dashed #d55e00;
+}
+.asset-row.changed td:first-child {
+  border-left: 4px dotted #e69f00;
+}
+.asset-row.same td:first-child {
+  border-left: 4px solid transparent;
+}
+.asset-row.same {
+  color: var(--muted);
+}
+.asset-change {
+  white-space: nowrap;
+  color: var(--muted);
+}
+.asset-key {
+  font-family: Consolas, monospace;
+  word-break: break-word;
+}
+.asset-value {
+  font-family: Consolas, monospace;
+  word-break: break-word;
+  max-width: 40ch;
+}
 .bp-stage {
   flex: 1;
   position: relative;

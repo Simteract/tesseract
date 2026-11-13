@@ -23,7 +23,7 @@ interface Props {
 
 const LEVEL_TEXT: Record<WalkthroughLevel, string> = { new: 'New to this code', familiar: 'I know this code' }
 
-const KIND_TEXT: Record<WalkthroughStepKind, string> = { overview: 'Overview', concept: 'Concept', change: 'Change', blueprint: 'Blueprint' }
+const KIND_TEXT: Record<WalkthroughStepKind, string> = { overview: 'Overview', concept: 'Concept', change: 'Change', blueprint: 'Blueprint or asset' }
 
 /** Left panel with the walkthrough: Claude teaches the change step by step, and each step selects its units. */
 export function WalkthroughPanel(props: Props): React.JSX.Element {

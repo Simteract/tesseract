@@ -1,5 +1,6 @@
 import { structuredPatch } from 'diff'
 import { basename, posix } from 'node:path'
+import { type AssetDiff, assetChanged } from '../shared/assetdiff'
 import { type BpGraphDiff, graphChanged } from '../shared/bpdiff'
 import type { Cluster, FileChange, GraphEdge, GraphNode } from '../shared/types'
 import type { ParsedFile, ParsedFunction } from './cpp'
@@ -32,9 +33,10 @@ export interface Graph {
 
 /**
  * Builds the graph of changed units. `blueprints` holds the Blueprint diff of each changed
- * Blueprint asset, by path. Each changed Blueprint graph becomes one unit.
+ * Blueprint asset, by path. Each changed Blueprint graph becomes one unit. `assets` holds the
+ * property diff of each changed asset, by path. A changed property diff becomes one more unit.
  */
-export async function buildGraph(files: FileChange[], contents: Map<number, string>, blueprints = new Map<string, BpGraphDiff[]>()): Promise<Graph> {
+export async function buildGraph(files: FileChange[], contents: Map<number, string>, blueprints = new Map<string, BpGraphDiff[]>(), assets = new Map<string, AssetDiff>()): Promise<Graph> {
   const nodes = new Map<string, GraphNode>()
   const edges = new Map<string, GraphEdge>()
   const headFunctions: HeadFunction[] = []
@@ -43,13 +45,13 @@ export async function buildGraph(files: FileChange[], contents: Map<number, stri
 
   for (const file of files) {
     const changedGraphs = (blueprints.get(file.path) ?? []).filter(graphChanged)
-    if (changedGraphs.length > 0) {
-      for (const graph of changedGraphs) {
-        const node = addNode(nodes, blueprintNode(file, graph))
-        blueprintCalls.push({ nodeId: node.id, calls: calledFunctions(graph) })
-      }
-      continue
+    const assetDiff = assets.get(file.path)
+    for (const graph of changedGraphs) {
+      const node = addNode(nodes, blueprintNode(file, graph))
+      blueprintCalls.push({ nodeId: node.id, calls: calledFunctions(graph) })
     }
+    if (assetChanged(assetDiff)) addNode(nodes, assetNode(file, assetDiff))
+    if (changedGraphs.length > 0 || assetChanged(assetDiff)) continue
     const head = contents.get(file.headRevId)
     const base = contents.get(file.baseRevId)
     const changes = lineChanges(base ?? '', head ?? '')
@@ -190,6 +192,29 @@ function blueprintNode(file: FileChange, graph: BpGraphDiff): GraphNode {
     side: file.status === 'D' ? 'base' : 'head',
     added: graph.added,
     removed: graph.removed
+  }
+}
+
+/** The unit id of the property diff of an asset. */
+export function assetUnitId(path: string): string {
+  return `${path}::asset`
+}
+
+function assetNode(file: FileChange, diff: AssetDiff): GraphNode {
+  const asset = basename(file.path).replace(/\.uasset$/i, '')
+  const suffix = diff.kind === 'table' ? ' rows' : diff.kind === 'defaults' ? '.Defaults' : ''
+  return {
+    id: assetUnitId(file.path),
+    label: `${asset}${suffix}`,
+    qualifiedName: `${asset}${suffix.replace('.', '::')}`,
+    kind: 'asset',
+    role: 'changed',
+    file: file.path,
+    startLine: 1,
+    endLine: 1,
+    side: file.status === 'D' ? 'base' : 'head',
+    added: diff.added + diff.changed,
+    removed: diff.removed + diff.changed
   }
 }
 

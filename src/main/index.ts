@@ -302,6 +302,11 @@ function registerIpc(): void {
     const file = service.model(modelKey).files.find((f) => f.path === path)
     return file ? service.blueprintDiff(file) : []
   })
+  ipcMain.handle('asset:diff', (_e, { modelKey, path }: { modelKey: string; path: string }) => {
+    const service = reviewService()
+    const file = service.model(modelKey).files.find((f) => f.path === path)
+    return file ? service.assetDiff(file) : undefined
+  })
   ipcMain.handle('comments:refresh', (_e, key: string) => reviewService().refreshComments(key))
   ipcMain.handle('comments:add', async (_e, a: { modelKey: string; text: string; path?: string; line?: number; type?: string }) => {
     const s = reviewService()

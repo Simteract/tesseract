@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describeBlueprintDiff } from '../shared/bpdiff'
 import {
   AI_EFFORTS,
   AI_MODELS,
@@ -21,8 +20,7 @@ import {
   type WalkthroughStep,
   type WalkthroughStepKind
 } from '../shared/types'
-import { clusterDiff, clusterRelations, nodeDiff, renderThread, threadsOf } from './context'
-import { blueprintUnitId } from './graph'
+import { clusterDiff, clusterRelations, diffFence, nodeDiff, renderThread, threadsOf } from './context'
 import { codeLanguage } from './languages'
 import type { ReviewService } from './review'
 
@@ -197,7 +195,7 @@ export async function preReview(service: ReviewService, model: ReviewModel, work
 
 /**
  * Lists each changed unit with its handle, place, relations and diff, until the diff budget runs out.
- * A Blueprint unit gets the text form of its graph diff, because a text diff of a .uasset file is noise.
+ * A Blueprint or asset unit gets the text form of its diff, because a text diff of a .uasset file is noise.
  */
 function changedUnitSections(service: ReviewService, model: ReviewModel, handles: Map<string, GraphNode>): string[] {
   const byId = new Map(model.nodes.map((n) => [n.id, n]))
@@ -215,24 +213,15 @@ function changedUnitSections(service: ReviewService, model: ReviewModel, handles
       callers.length ? `Called by: ${names(callers)}` : '',
       calls.length ? `Calls: ${names(calls)}` : ''
     )
-    const blueprint = node.kind === 'blueprint'
-    const diff = blueprint ? blueprintUnitDiff(service, model, node) : nodeDiff(service, model, node)
+    const diff = nodeDiff(service, model, node)
     if (budget <= 0) sections.push('(diff left out: the prompt is full)')
     else {
       const shown = diff.slice(0, Math.min(UNIT_DIFF_LINES, budget))
       budget -= shown.length
-      sections.push(blueprint ? '```text' : '```diff', ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
+      sections.push(diffFence(node.file), ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
     }
   }
   return sections
-}
-
-/** The text form of the Blueprint diff of one graph. The node is one graph of a .uasset file. */
-function blueprintUnitDiff(service: ReviewService, model: ReviewModel, node: GraphNode): string[] {
-  const file = model.files.find((f) => f.path === node.file)
-  if (!file) return []
-  const graphs = service.blueprintDiff(file).filter((g) => blueprintUnitId(file.path, g.name) === node.id)
-  return describeBlueprintDiff(file.path, graphs).split('\n')
 }
 
 /** Walkthroughs read the whole change and look up definitions, like a pre-review. */
@@ -299,7 +288,7 @@ export async function walkthrough(service: ReviewService, model: ReviewModel, wo
     'Rules for the steps:',
     '- The first step has kind "overview": what the change is for and how its parts fit together. It names no units or only the main entry points.',
     '- Then "concept" steps if the level rules ask for them. They explain an idea and point at the units that show it, often C units.',
-    '- Then "change" steps, one group of related units per step. Order them so that each step builds on the steps before it: data and types before the code that uses them, callees before callers when that is easier to follow. Use kind "blueprint" for a step about Blueprint units.',
+    '- Then "change" steps, one group of related units per step. Order them so that each step builds on the steps before it: data and types before the code that uses them, callees before callers when that is easier to follow. Use kind "blueprint" for a step about Blueprint units or asset units (Data Assets, DataTables, Blueprint class defaults).',
     '- Each step title is a goal of 3 to 9 words that starts with a verb, e.g. "Understand how the cache is filled" or "See why the timer now stops".',
     '- Each step text has 2 to 6 plain sentences. Say what the code does and why it changed. Do not judge the code and do not list bugs: the reviewer does that.',
     '- Each step has 1 or 2 "checks": questions that the reviewer answers by reading the code of the step, e.g. "What happens when the list is empty?". Do not answer them.',
@@ -455,7 +444,7 @@ export async function explainContext(service: ReviewService, model: ReviewModel,
     const diff = nodeDiff(service, model, node)
     const shown = diff.slice(0, Math.min(EXPLAIN_CHANGE_LINES, budget))
     budget -= shown.length
-    changes.push('```diff', ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
+    changes.push(diffFence(node.file), ...shown, ...(shown.length < diff.length ? ['... (diff cut)'] : []), '```')
   }
   const prompt = [
     `You help a human code reviewer in ${projectKind(model)}.`,

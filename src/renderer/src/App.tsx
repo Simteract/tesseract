@@ -14,6 +14,7 @@ import {
   type Walkthrough,
   type WalkthroughLevel
 } from '../../shared/types'
+import { AssetPanel } from './AssetPanel'
 import { BlueprintPanel } from './BlueprintPanel'
 import { CodePanel } from './CodePanel'
 import { CommitsMenu } from './CommitsMenu'
@@ -675,6 +676,8 @@ export function App(): React.JSX.Element {
             <div className="code-area">
               {codeNode?.kind === 'blueprint' ? (
                 <BlueprintPanel model={model} node={codeNode} />
+              ) : codeNode?.kind === 'asset' ? (
+                <AssetPanel model={model} node={codeNode} />
               ) : (
               <CodePanel
                 model={model}

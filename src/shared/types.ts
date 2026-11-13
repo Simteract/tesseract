@@ -1,3 +1,4 @@
+import type { AssetDiff } from './assetdiff'
 import type { BpGraphDiff } from './bpdiff'
 
 export interface ReviewSummary {
@@ -27,7 +28,7 @@ export interface FileChange {
   isCode: boolean
 }
 
-export type UnitKind = 'function' | 'declarations' | 'file' | 'blueprint'
+export type UnitKind = 'function' | 'declarations' | 'file' | 'blueprint' | 'asset'
 
 export type NodeRole = 'changed' | 'context'
 
@@ -275,6 +276,26 @@ export interface Blueprint {
 }
 
 /**
+ * The kind of a property set in an asset. 'data' is a Data Asset or another asset, 'table' is a
+ * DataTable, and 'defaults' is the class defaults of a Blueprint.
+ */
+export type AssetKind = 'data' | 'table' | 'defaults'
+
+/** One object or one DataTable row. The props map a readable path to a value, for example "Weapons[2].Damage". */
+export interface AssetGroup {
+  name: string
+  kind: 'object' | 'row'
+  props: Record<string, string>
+}
+
+/** The readable properties of one asset revision. */
+export interface AssetProperties {
+  className: string
+  kind: AssetKind
+  groups: AssetGroup[]
+}
+
+/**
  * The state of the auto updater. 'dev' means that the app does not run from an installer, so it cannot update.
  * 'latest' means that no newer version exists. 'ready' means that the new version is downloaded.
  */
@@ -387,6 +408,7 @@ export interface Api {
   loadLocal(range?: CommitRange): Promise<ReviewModel>
   getFile(revId: number): Promise<string | null>
   getBlueprintDiff(args: { modelKey: string; path: string }): Promise<BpGraphDiff[]>
+  getAssetDiff(args: { modelKey: string; path: string }): Promise<AssetDiff | undefined>
   refreshComments(modelKey: string): Promise<ReviewComment[]>
   addComment(args: { modelKey: string; text: string; path?: string; line?: number; type?: string }): Promise<ReviewComment[]>
   replyComment(args: { modelKey: string; guid: string; text: string; discard: boolean }): Promise<ReviewComment[]>

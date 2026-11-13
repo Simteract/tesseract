@@ -16,6 +16,7 @@ const api: Api = {
   loadLocal: (range) => ipcRenderer.invoke('local:load', range),
   getFile: (revId) => ipcRenderer.invoke('file:get', revId),
   getBlueprintDiff: (args) => ipcRenderer.invoke('blueprint:diff', args),
+  getAssetDiff: (args) => ipcRenderer.invoke('asset:diff', args),
   refreshComments: (modelKey) => ipcRenderer.invoke('comments:refresh', modelKey),
   addComment: (args) => ipcRenderer.invoke('comments:add', args),
   replyComment: (args) => ipcRenderer.invoke('comments:reply', args),

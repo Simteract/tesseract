@@ -125,6 +125,7 @@ const STYLE: cytoscape.StylesheetJson = [
     }
   },
   { selector: 'node.blueprint', style: { shape: 'cut-rectangle' } },
+  { selector: 'node.asset', style: { shape: 'barrel' } },
   { selector: 'node.context', style: { 'background-color': '#2a2e37', color: '#a5acb8', 'border-style': 'dashed', 'border-color': '#5c6370', 'font-size': 10 } },
   { selector: 'node.deleted', style: { 'border-color': '#D55E00', 'border-style': 'double', 'border-width': 4,'text-decoration': 'line-through' } as cytoscape.Css.Node },
   { selector: 'node.has-comments', style: { 'border-color': '#F0E442', 'border-width': 2 } },
@@ -231,7 +232,7 @@ export function GraphView({ model, selectedId, reviewed, hotspots, explanations,
             color,
             textColor: textOn(color)
           },
-          classes: [n.kind === 'blueprint' ? 'blueprint' : '', n.role === 'context' ? 'context' : '', n.side === 'base' ? 'deleted' : ''].join(' ')
+          classes: [n.kind === 'blueprint' || n.kind === 'asset' ? n.kind : '',n.role === 'context' ? 'context' : '', n.side === 'base' ? 'deleted' : ''].join(' ')
         }
       }),
       ...model.edges.map((e) => ({ data: { id: e.id, source: e.source, target: e.target }, classes: e.kind }))

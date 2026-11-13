@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { z } from 'zod'
 import type { Draft, GraphNode, McpInfo, ReviewFilter, ReviewModel, ReviewSummary, Selection } from '../shared/types'
-import { clusterDiff, clusterRelations, nodeDiff, renderThread, shortUser, threadsOf } from './context'
+import { clusterDiff, clusterRelations, diffFence, nodeDiff, renderThread, shortUser, threadsOf } from './context'
 import { codeLanguage } from './languages'
 import type { ReviewService } from './review'
 
@@ -329,7 +329,7 @@ function describeNode(service: ReviewService, model: ReviewModel, node: GraphNod
     comments.length ? `Comments: ${comments.map((c) => `#${c.id} ${shortUser(c.owner)} line ${c.line}: ${c.text.split(/\r?\n/)[0]}`).join(' | ')}` : ''
   ].filter(Boolean)
   const diff = nodeDiff(service, model, node)
-  if (diff.length) return [...parts, '', '## Diff', '```diff', ...diff, '```']
+  if (diff.length) return [...parts, '', '## Diff', diffFence(node.file), ...diff, '```']
   const file = model.files.find((f) => f.path === node.file)
   const source = file ? service.readRevision(node.side === 'head' ? file.headRevId : file.baseRevId) : null
   if (!source) return parts

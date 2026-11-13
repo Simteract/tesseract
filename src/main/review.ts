@@ -1,11 +1,12 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { type AssetDiff, diffAssetProperties } from '../shared/assetdiff'
 import { type BpGraphDiff, diffBlueprint } from '../shared/bpdiff'
 import { excludeMatcher } from '../shared/glob'
-import { type Blueprint, type CommitRange, type FileChange, LOAD_CANCELLED, type ReviewComment, type ReviewModel } from '../shared/types'
+import { type AssetProperties, type Blueprint, type CommitRange, type FileChange, LOAD_CANCELLED, type ReviewComment, type ReviewModel } from '../shared/types'
 import { buildGraph } from './graph'
 import type { ReviewSource, ReviewTarget } from './source'
-import { isUnrealPackage, readBlueprint } from './uasset'
+import { isUnrealPackage, readAssetProperties, readBlueprint } from './uasset'
 
 /** Files above this size are not diffed or parsed. They are mostly generated code or data. */
 const MAX_TEXT_BYTES = 2_000_000
@@ -17,6 +18,8 @@ export class ReviewService {
   private readonly models = new Map<string, ReviewModel>()
   /** Parsed Blueprints by revision id. Null marks a revision without a Blueprint. */
   private readonly blueprints = new Map<number, Blueprint | null>()
+  /** Parsed asset properties by revision id. Null marks a revision that the reader cannot read. */
+  private readonly assets = new Map<number, AssetProperties | null>()
   /** The user name on the server, read once. It marks the comments that the user may edit or delete. */
   private me?: Promise<string>
   /** One controller per running load. cancelLoads aborts them all. */
@@ -118,9 +121,12 @@ export class ReviewService {
     signal.throwIfAborted()
     const contents = new Map<number, string>()
     const blueprints = new Map<string, BpGraphDiff[]>()
+    const assets = new Map<string, AssetDiff>()
     for (const file of textFiles) {
       if (isBlueprintPath(file.path)) {
         blueprints.set(file.path, this.blueprintDiff(file))
+        const assetDiff = this.assetDiff(file)
+        if (assetDiff) assets.set(file.path, assetDiff)
         continue
       }
       for (const id of [file.baseRevId, file.headRevId]) {
@@ -129,7 +135,7 @@ export class ReviewService {
       }
     }
     this.progress('Parsing the code and building the graph')
-    const graph = await buildGraph(files, contents, blueprints)
+    const graph = await buildGraph(files, contents, blueprints, assets)
     signal.throwIfAborted()
     const comments = review ? await this.loadComments(review.id, files) : []
     const reviewers = review ? await this.source.reviewers(review.id) : []
@@ -186,6 +192,27 @@ export class ReviewService {
 
   blueprintDiff(file: FileChange): BpGraphDiff[] {
     return diffBlueprint(this.readBlueprint(file.baseRevId), this.readBlueprint(file.headRevId))
+  }
+
+  /** Reads the properties of an asset revision. Returns undefined for a missing revision or an unknown format. */
+  readAssetProperties(revId: number): AssetProperties | undefined {
+    if (this.assets.has(revId)) return this.assets.get(revId) ?? undefined
+    const path = join(this.revisionDir, String(revId))
+    let asset: AssetProperties | undefined
+    if (revId > 0 && existsSync(path)) {
+      const bytes = readFileSync(path)
+      try {
+        asset = isUnrealPackage(bytes) ? readAssetProperties(bytes) : undefined
+      } catch (e) {
+        console.error(`Cannot read the asset properties of revision ${revId}:`, e)
+      }
+    }
+    this.assets.set(revId, asset ?? null)
+    return asset
+  }
+
+  assetDiff(file: FileChange): AssetDiff | undefined {
+    return diffAssetProperties(this.readAssetProperties(file.baseRevId), this.readAssetProperties(file.headRevId))
   }
 
   async ensureRevision(revId: number): Promise<string | null> {

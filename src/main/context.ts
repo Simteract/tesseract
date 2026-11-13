@@ -1,8 +1,11 @@
 import { structuredPatch } from 'diff'
+import { assetChanged, describeAssetDiff } from '../shared/assetdiff'
+import { describeBlueprintDiff, graphChanged } from '../shared/bpdiff'
 import type { Cluster, GraphNode, ReviewComment, ReviewModel } from '../shared/types'
 import { isOpenThread } from '../shared/threads'
+import { blueprintUnitId } from './graph'
 import { codeLanguage } from './languages'
-import type { ReviewService } from './review'
+import { isBlueprintPath, type ReviewService } from './review'
 
 /** Lines of code shown above and below a commented line. */
 const EXCERPT_RADIUS = 6
@@ -21,10 +24,18 @@ export function clusterRelations(model: ReviewModel, cluster: Cluster): string[]
   return relations
 }
 
-/** Returns the unified diff of one file as lines. A range keeps only the hunks that touch those head lines. */
+/**
+ * Returns the unified diff of one file as lines. A range keeps only the hunks that touch those head lines.
+ * An Unreal asset gets the text form of its Blueprint and property diffs, because a text diff of binary data is noise.
+ */
 export function fileDiff(service: ReviewService, model: ReviewModel, path: string, range?: { from: number; to: number; side: 'head' | 'base' }): string[] {
   const file = model.files.find((f) => f.path === path)
   if (!file) return []
+  if (isBlueprintPath(path)) {
+    const graphs = service.blueprintDiff(file).filter(graphChanged)
+    const asset = service.assetDiff(file)
+    return [...(graphs.length ? describeBlueprintDiff(path, graphs).split('\n') : []), ...(assetChanged(asset) ? describeAssetDiff(path, asset).split('\n') : [])]
+  }
   const base = service.readRevision(file.baseRevId) ?? ''
   const head = service.readRevision(file.headRevId) ?? ''
   return structuredPatch(path, path, base, head, 'base', 'head', { context: 3 })
@@ -47,14 +58,26 @@ export function clusterDiff(service: ReviewService, model: ReviewModel, cluster:
     }
     const status = model.files.find((f) => f.path === path)?.status ?? '?'
     const lines = fileDiff(service, model, path)
-    parts.push(`### ${path} (${status})`, '```diff', ...lines.slice(0, budget), '```')
+    parts.push(`### ${path} (${status})`, diffFence(path), ...lines.slice(0, budget), '```')
     budget -= lines.length
   }
   return parts
 }
 
+/** The diff of one unit. A Blueprint unit is one graph, and an asset unit is the property diff of the asset. */
 export function nodeDiff(service: ReviewService, model: ReviewModel, node: GraphNode): string[] {
+  const file = model.files.find((f) => f.path === node.file)
+  if (file && node.kind === 'blueprint') {
+    const graphs = service.blueprintDiff(file).filter((g) => blueprintUnitId(file.path, g.name) === node.id)
+    return describeBlueprintDiff(file.path, graphs).split('\n')
+  }
+  if (file && node.kind === 'asset') return describeAssetDiff(file.path, service.assetDiff(file)).split('\n')
   return fileDiff(service, model, node.file, { from: node.startLine, to: node.endLine, side: node.side })
+}
+
+/** The opening fence for the diff of a file. Asset diffs are plain text, not unified diffs. */
+export function diffFence(path: string): string {
+  return isBlueprintPath(path) ? '```text' : '```diff'
 }
 
 export function excerpt(text: string, line: number, radius = EXCERPT_RADIUS): string {

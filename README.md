@@ -78,6 +78,18 @@ C++ and Rust code is parsed with tree-sitter. Unreal macros such as `UCLASS`, `U
 `*_API` are removed before parsing, so Unreal headers parse correctly. A Rust method gets the type
 of its `impl` or `trait` block as its class.
 
+Unreal `.uasset` files are read too, so a binary asset is not a blank node:
+
+![Unreal asset changes](docs/media/2-unreal-assets.webp)
+
+- Each changed Blueprint graph is a unit. Its view draws the nodes and wires, and marks what was
+  added, removed or changed.
+- Data Assets, DataTables and the class defaults of Blueprints get a property table: each changed
+  value with its old and new value, for example `Weapons[2].Damage: 30 -> 40`. A DataTable shows
+  the rows that were added, removed or changed. "(not set)" means that the asset does not save the
+  value, so it uses the default. Type in the filter box to find a property.
+- Claude and the MCP tools get the same changes as text.
+
 ### 3. Clusters and summaries
 
 ![Clusters](docs/media/3-clusters.webp)
@@ -329,6 +341,8 @@ are stored in
   unit.
 - Callers are found only in the changed files of the review.
 - Only C++ and Rust code is parsed. Other files are shown as whole-file nodes.
+- Unreal assets must be saved by the editor (not cooked) with UE 4.26 or later. Curve keys and
+  other values in a custom binary format are not shown.
 - GitHub accepts a line comment only on a line that the diff shows. A comment on another line goes
   on the whole file, with the line number in the text.
 - GitHub has no general comment threads, so a reply to a general comment is a new general comment.
